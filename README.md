@@ -13,6 +13,8 @@ uploads and an agent protocol.
   are dropped rather than allowed to split the response
 - `Server` — bounded connections, read and write timeouts, header and body limits, per-route body
   limit, a refusal callback
+- `Router` — method and path matching with `:name` captures and a trailing `*rest`; answers 405
+  naming what the route does take, and 404 otherwise
 - `json` — a writer for response bodies, escaping `<` and every control character
 - `percent` — decode and encode, `pairs` for query and form bodies
 - `status` — reason phrases
@@ -21,19 +23,25 @@ uploads and an agent protocol.
 
 ```rust
 use std::net::TcpListener;
-use loom::{Request, Response, Server};
-
-fn route(request: &Request) -> Response {
-    match request.segments().as_slice() {
-        ["hello"] => Response::text("hello"),
-        _ => request.error(404, "unknown_route", "no such route"),
-    }
-}
+use loom::{Params, Request, Response, Router, Server};
 
 fn main() -> std::io::Result<()> {
-    Server::new(route).serve(TcpListener::bind("127.0.0.1:8099")?)
+    let router = Router::new()
+        .get("/who/:name", |_: &Request, held: &Params| {
+            Response::text(format!("hello {}", held.get("name").unwrap_or("world")))
+        })
+        .get("/assets/*path", |_: &Request, held: &Params| {
+            Response::text(format!("file {}", held.get("path").unwrap()))
+        });
+
+    Server::new(move |request| router.answer(request))
+        .serve(TcpListener::bind("127.0.0.1:8099")?)
 }
 ```
+
+A handler takes `(&Request, &Params)` and returns a `Response`. Captures arrive already
+percent-decoded. An exact segment is preferred over a capture at the same depth, and `*rest` must
+be last and must match at least one segment.
 
 ```
 cargo run --example hello
@@ -54,5 +62,5 @@ send `content-length`.
 
 ## Not here
 
-One thread per connection, one request per connection, no keep-alive, no TLS, no routing table,
-no async. HTTP/1.1 to the extent an admin API needs it.
+One thread per connection, one request per connection, no keep-alive, no TLS, no async, no
+middleware, no compression, no static-file responder. HTTP/1.1 to the extent an admin API needs it.

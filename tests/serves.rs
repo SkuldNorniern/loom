@@ -3,7 +3,7 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
-use loom::{Request, Response, Server};
+use loom::{Params, Request, Response, Router, Server};
 
 fn listening(server: Server) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -111,4 +111,54 @@ fn what_the_server_refused_is_told_to_the_caller() {
     assert_eq!(from, "127.0.0.1");
     assert_eq!(code, "bad_framing");
     assert_eq!(path, "/hello");
+}
+
+#[test]
+fn routed_request_over_socket_carries_its_captured_parameters() {
+    let router = Router::new()
+        .get("/api/agents/:id", |_: &Request, held: &Params| {
+            Response::text(format!("agent {}", held.get("id").unwrap()))
+        })
+        .post(
+            "/api/agents/:id/findings",
+            |request: &Request, held: &Params| {
+                Response::text(format!(
+                    "{} sent {} bytes",
+                    held.get("id").unwrap(),
+                    request.body.len()
+                ))
+            },
+        )
+        .get("/assets/*path", |_: &Request, held: &Params| {
+            Response::text(format!("file {}", held.get("path").unwrap()))
+        });
+    let at = listening(Server::new(move |request| router.answer(request)));
+
+    let said = ask(&at, "GET /api/agents/lab-pc-07 HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(said.ends_with("agent lab-pc-07"), "{said}");
+
+    let said = ask(
+        &at,
+        "POST /api/agents/lab-pc-07/findings HTTP/1.1\r\nContent-Length: 3\r\n\r\nabc",
+    );
+    assert!(said.ends_with("lab-pc-07 sent 3 bytes"), "{said}");
+
+    let said = ask(
+        &at,
+        "GET /assets/css/console.css HTTP/1.1\r\nHost: x\r\n\r\n",
+    );
+    assert!(said.ends_with("file css/console.css"), "{said}");
+
+    let said = ask(
+        &at,
+        "DELETE /api/agents/lab-pc-07 HTTP/1.1\r\nHost: x\r\n\r\n",
+    );
+    assert!(
+        said.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"),
+        "{said}"
+    );
+    assert!(said.contains("allow: GET\r\n"), "{said}");
+
+    let said = ask(&at, "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(said.starts_with("HTTP/1.1 404 Not Found\r\n"), "{said}");
 }
