@@ -1,9 +1,9 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
-use loom::{Params, Request, Response, Router, Server};
+use loom::{Limits, Params, Request, Response, Router, Server};
 
 fn listening(server: Server) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -13,15 +13,40 @@ fn listening(server: Server) -> String {
 }
 
 fn ask(at: &str, raw: &str) -> String {
+    let closing = if raw.contains("Connection:") {
+        raw.to_owned()
+    } else {
+        raw.replacen("\r\n\r\n", "\r\nConnection: close\r\n\r\n", 1)
+    };
     let mut stream = TcpStream::connect(at).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    stream.write_all(raw.as_bytes()).unwrap();
+    stream.write_all(closing.as_bytes()).unwrap();
     stream.flush().unwrap();
     let mut said = Vec::new();
     stream.read_to_end(&mut said).unwrap();
     String::from_utf8_lossy(&said).into_owned()
+}
+
+fn one_answer(reader: &mut BufReader<TcpStream>) -> String {
+    let mut head = String::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        if line == "\r\n" || line.is_empty() {
+            break;
+        }
+        head.push_str(&line);
+    }
+    let length: usize = head
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Length: "))
+        .and_then(|held| held.trim().parse().ok())
+        .unwrap_or(0);
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
+    format!("{head}\r\n{}", String::from_utf8_lossy(&body))
 }
 
 fn routed(request: &Request) -> Response {
@@ -161,4 +186,66 @@ fn routed_request_over_socket_carries_its_captured_parameters() {
 
     let said = ask(&at, "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n");
     assert!(said.starts_with("HTTP/1.1 404 Not Found\r\n"), "{said}");
+}
+
+#[test]
+fn one_socket_answers_several_requests_then_closes_when_told() {
+    let at = listening(Server::new(routed));
+    let stream = TcpStream::connect(&at).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+
+    for name in ["one", "two", "three"] {
+        writer
+            .write_all(format!("GET /hello?name={name} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+            .unwrap();
+        writer.flush().unwrap();
+        let said = one_answer(&mut reader);
+        assert!(said.contains("Connection: keep-alive\r\n"), "{said}");
+        assert!(said.ends_with(&format!("hello {name}")), "{said}");
+    }
+
+    writer
+        .write_all(b"GET /hello HTTP/1.1\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    writer.flush().unwrap();
+    let said = one_answer(&mut reader);
+    assert!(said.contains("Connection: close\r\n"), "{said}");
+
+    let mut rest = Vec::new();
+    reader.read_to_end(&mut rest).unwrap();
+    assert!(rest.is_empty(), "the server closed after being told to");
+}
+
+#[test]
+fn a_connection_is_closed_after_its_share_of_requests() {
+    let at = listening(Server::new(routed).limits(Limits {
+        per_connection: 2,
+        ..Limits::default()
+    }));
+    let stream = TcpStream::connect(&at).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+
+    writer
+        .write_all(b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    writer.flush().unwrap();
+    assert!(one_answer(&mut reader).contains("Connection: keep-alive\r\n"));
+
+    writer
+        .write_all(b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    writer.flush().unwrap();
+    let said = one_answer(&mut reader);
+    assert!(
+        said.contains("Connection: close\r\n"),
+        "the last request of a connection says so: {said}"
+    );
 }

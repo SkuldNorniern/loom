@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Read};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -14,6 +14,8 @@ pub struct Limits {
     pub body: usize,
     pub connections: usize,
     pub timeout: Duration,
+    pub idle: Duration,
+    pub per_connection: usize,
 }
 
 impl Default for Limits {
@@ -23,6 +25,8 @@ impl Default for Limits {
             body: 1024 * 1024,
             connections: 16,
             timeout: Duration::from_secs(15),
+            idle: Duration::from_secs(5),
+            per_connection: 100,
         }
     }
 }
@@ -115,23 +119,45 @@ impl Server {
             let on_refusal = Arc::clone(&on_refusal);
             thread::spawn(move || {
                 let _slot = slot;
-                let _ = stream.set_read_timeout(Some(limits.timeout));
                 let _ = stream.set_write_timeout(Some(limits.timeout));
                 let from = stream
                     .peer_addr()
                     .map(|address| address.ip().to_string())
                     .unwrap_or_default();
-                let response = match read(&mut stream, &from, limits, body_limit.as_deref()) {
-                    Ok(Some(request)) => handler(&request),
-                    Ok(None) => Response::refused(400, "bad_request", "malformed request"),
-                    Err(refusal) => {
-                        if let Some(told) = on_refusal.as_deref() {
-                            told(&from, &refusal);
-                        }
-                        Response::refused(refusal.status, refusal.code, &refusal.message)
-                    }
+                let Ok(copy) = stream.try_clone() else {
+                    return;
                 };
-                let _ = response.write_to(&mut stream);
+                let mut reader = BufReader::new(copy);
+                for turn in 0..limits.per_connection.max(1) {
+                    let first = turn == 0;
+                    let _ = stream.set_read_timeout(Some(if first {
+                        limits.timeout
+                    } else {
+                        limits.idle
+                    }));
+                    let read = read(&mut reader, &from, limits, body_limit.as_deref());
+                    let (response, keep) = match read {
+                        Ok(Some(request)) => {
+                            let keep = request.wants_keeping_alive();
+                            (handler(&request), keep)
+                        }
+                        Ok(None) => return,
+                        Err(refusal) => {
+                            if let Some(told) = on_refusal.as_deref() {
+                                told(&from, &refusal);
+                            }
+                            (
+                                Response::refused(refusal.status, refusal.code, &refusal.message),
+                                false,
+                            )
+                        }
+                    };
+                    let last = turn + 1 >= limits.per_connection.max(1);
+                    let keep = keep && !last;
+                    if response.write_with(&mut stream, keep).is_err() || !keep {
+                        return;
+                    }
+                }
             });
         }
         Ok(())
@@ -169,17 +195,12 @@ fn line_of(head: &str) -> (&str, &str) {
 }
 
 fn read(
-    stream: &mut TcpStream,
+    reader: &mut impl BufRead,
     from: &str,
     limits: Limits,
     body_limit: Option<&Measure>,
 ) -> Result<Option<Request>, Refusal> {
-    let mut reader = BufReader::new(
-        stream
-            .try_clone()
-            .map_err(|_| Refusal::new(500, "read_failed", "connection could not be read"))?,
-    );
-    let head = read_head(&mut reader, limits.header)?;
+    let head = read_head(reader, limits.header)?;
     let Some(head) = head else { return Ok(None) };
     let length = body_length(&head).map_err(|refusal| refusal.about(&head))?;
     let (method, path) = line_of(&head);
@@ -359,5 +380,7 @@ mod tests {
         assert_eq!(limits.body, 1024 * 1024);
         assert_eq!(limits.connections, 16);
         assert_eq!(limits.timeout, Duration::from_secs(15));
+        assert_eq!(limits.idle, Duration::from_secs(5));
+        assert_eq!(limits.per_connection, 100);
     }
 }

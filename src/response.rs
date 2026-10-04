@@ -91,13 +91,18 @@ impl Response {
     }
 
     pub fn head(&self) -> String {
+        self.head_with(false)
+    }
+
+    pub fn head_with(&self, keep: bool) -> String {
         let mut head = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\n\
              X-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\n",
             self.status,
             status::reason(self.status),
             self.content_type,
-            self.body.len()
+            self.body.len(),
+            if keep { "keep-alive" } else { "close" }
         );
         for (name, value) in self.headers.iter() {
             if name.bytes().any(is_control) || value.bytes().any(is_control) {
@@ -110,8 +115,13 @@ impl Response {
     }
 
     pub fn write_to(&self, out: &mut impl Write) -> std::io::Result<()> {
-        out.write_all(self.head().as_bytes())?;
-        out.write_all(&self.body)
+        self.write_with(out, false)
+    }
+
+    pub fn write_with(&self, out: &mut impl Write, keep: bool) -> std::io::Result<()> {
+        out.write_all(self.head_with(keep).as_bytes())?;
+        out.write_all(&self.body)?;
+        out.flush()
     }
 }
 
@@ -167,6 +177,16 @@ mod tests {
         assert_eq!(held.header("set-cookie"), Some("session=abc; HttpOnly"));
         assert_eq!(held.header("Set-Cookie"), Some("session=abc; HttpOnly"));
         assert_eq!(held.header("content-type"), None);
+    }
+
+    #[test]
+    fn connection_header_says_which_way_the_socket_goes() {
+        assert!(Response::text("x").head().contains("Connection: close\r\n"));
+        assert!(
+            Response::text("x")
+                .head_with(true)
+                .contains("Connection: keep-alive\r\n")
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub struct Request {
     pub headers: Headers,
     pub from: String,
     pub body: Vec<u8>,
+    version_keeps_alive: bool,
 }
 
 impl Request {
@@ -27,6 +28,7 @@ impl Request {
         let mut parts = head.lines().next()?.split_whitespace();
         let method = Method::of_str(parts.next()?);
         let target = parts.next()?;
+        let version_keeps_alive = parts.next().is_none_or(|held| held != "HTTP/1.0");
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
         let headers: Headers = head
             .lines()
@@ -42,6 +44,7 @@ impl Request {
             headers,
             from,
             body,
+            version_keeps_alive,
         })
     }
 
@@ -55,6 +58,15 @@ impl Request {
 
     pub fn headers_named(&self, name: &str) -> impl Iterator<Item = &str> {
         self.headers.all(name)
+    }
+
+    pub fn wants_keeping_alive(&self) -> bool {
+        match self.header("connection") {
+            Some(held) => !held
+                .split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case("close")),
+            None => self.version_keeps_alive,
+        }
     }
 
     pub fn bearer(&self) -> Option<&str> {
@@ -212,6 +224,36 @@ mod tests {
         let form = request.form();
         assert_eq!(form.get("host").map(String::as_str), Some("LAB PC"));
         assert_eq!(form.get("at").map(String::as_str), Some("/tmp"));
+    }
+
+    #[test]
+    fn a_request_keeps_the_connection_unless_it_says_otherwise() {
+        let held = Request::parse("GET / HTTP/1.1\r\nHost: x\r\n", Vec::new()).unwrap();
+        assert!(held.wants_keeping_alive());
+
+        let closing =
+            Request::parse("GET / HTTP/1.1\r\nConnection: close\r\n", Vec::new()).unwrap();
+        assert!(!closing.wants_keeping_alive());
+
+        let listed = Request::parse(
+            "GET / HTTP/1.1\r\nConnection: keep-alive, Close\r\n",
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(
+            !listed.wants_keeping_alive(),
+            "close anywhere in the list closes"
+        );
+    }
+
+    #[test]
+    fn http_1_0_closes_unless_it_asks_to_keep_alive() {
+        let held = Request::parse("GET / HTTP/1.0\r\nHost: x\r\n", Vec::new()).unwrap();
+        assert!(!held.wants_keeping_alive());
+
+        let asked =
+            Request::parse("GET / HTTP/1.0\r\nConnection: keep-alive\r\n", Vec::new()).unwrap();
+        assert!(asked.wants_keeping_alive());
     }
 
     #[test]

@@ -7,20 +7,20 @@ Came out of the admin API of a DLP console, which it still serves.
 
 ## What is here
 
-- `Request` — `Method`, path, decoded query, `Headers`, body, caller address, request id, plus
-  `cookie(name)`, `bearer()`, `form()`, `segments()`
-- `Headers` — case-insensitive, keeps every value of a name that arrived twice. `get` answers the
-  first, `all` answers them in order
-- `Method` — the seven it knows, `Other(String)` for the rest, kept as written
-- `Response` — status, content type, body, extra headers. A header value with control characters is
-  dropped, so it cannot split the response
-- `Server` — bounded connections, read and write timeouts, header and body limits, per-route body
-  limit, refusal callback
-- `Router` — method and path matching, `:name` captures, trailing `*rest`. 405 names what the route
-  takes, 404 otherwise
-- `json` — writer for response bodies, escapes `<` and control characters
-- `percent` — decode and encode, `pairs` for query and form bodies
-- `status` — reason phrases
+- `Request`: `Method`, path, decoded query, `Headers`, body, caller address, request id. Plus
+  `cookie(name)`, `bearer()`, `form()`, `segments()`.
+- `Headers`: case-insensitive, and keeps every value of a name that arrived twice. `get` answers
+  the first, `all` answers them in order.
+- `Method`: the seven it knows, `Other(String)` for the rest, kept as written.
+- `Response`: status, content type, body, extra headers. A header value holding control characters
+  is dropped, so it cannot split the response.
+- `Server`: bounded connections, read and write timeouts, header and body limits, per-route body
+  limit, refusal callback.
+- `Router`: method and path matching, `:name` captures, trailing `*rest`. 405 names what the route
+  takes, 404 otherwise.
+- `json`: writer for response bodies. Escapes `<` and control characters.
+- `percent`: decode and encode, `pairs` for query and form bodies.
+- `status`: reason phrases.
 
 ## Use
 
@@ -52,19 +52,29 @@ cargo run --example hello
 
 ## Limits
 
-| limit | default | set with |
-|---|---|---|
-| request line and headers | 16 KiB | `Limits { header, .. }` |
-| body | 1 MiB | `Limits { body, .. }` |
-| body, per route | — | `.body_limit(\|method, path\| ...)` |
-| connections handled at once | 16 | `Limits { connections, .. }` |
-| read and write timeout | 15s | `Limits { timeout, .. }` |
+```text
+request line and headers    16 KiB     Limits { header, .. }
+body                        1 MiB      Limits { body, .. }
+body, per route             caller     .body_limit(|method, path| ...)
+connections at once         16         Limits { connections, .. }
+read and write timeout      15s        Limits { timeout, .. }
+wait for the next request   5s         Limits { idle, .. }
+requests per connection     100        Limits { per_connection, .. }
+```
 
 A connection past the limit gets `503 busy` and is closed. `transfer-encoding` is refused, send
 `content-length`.
 
+## Keeping the connection
+
+A connection is reused until the client says `Connection: close`, the request is HTTP/1.0 without
+`Connection: keep-alive`, `per_connection` requests have been answered, or nothing arrives within
+`idle`. The last answer on a connection says `Connection: close`, so a client is never left waiting
+on a socket the server is about to drop. A connection slot is held for the whole conversation, which
+is why `idle` is short.
+
 ## Working on
 
-One thread per connection, one request per connection. No keep-alive, chunked transfer or streaming
-bodies yet; the body is a `Vec<u8>` and the `Body` split waits until something streams. No TLS,
-async, middleware or compression. See `loom_plan.md`.
+One thread per connection. No chunked transfer or streaming bodies yet; the body is a `Vec<u8>` and
+the `Body` split waits until something streams. No TLS, async, middleware or compression. See
+`loom_plan.md`.
