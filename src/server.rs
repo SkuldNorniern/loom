@@ -23,7 +23,7 @@ impl Default for Limits {
         Self {
             header: 16 * 1024,
             body: 1024 * 1024,
-            connections: 16,
+            connections: 64,
             timeout: Duration::from_secs(15),
             idle: Duration::from_secs(5),
             per_connection: 100,
@@ -378,7 +378,7 @@ mod tests {
         let limits = Limits::default();
         assert_eq!(limits.header, 16 * 1024);
         assert_eq!(limits.body, 1024 * 1024);
-        assert_eq!(limits.connections, 16);
+        assert_eq!(limits.connections, 64);
         assert_eq!(limits.timeout, Duration::from_secs(15));
         assert_eq!(limits.idle, Duration::from_secs(5));
         assert_eq!(limits.per_connection, 100);

@@ -56,7 +56,7 @@ cargo run --example hello
 request line and headers    16 KiB     Limits { header, .. }
 body                        1 MiB      Limits { body, .. }
 body, per route             caller     .body_limit(|method, path| ...)
-connections at once         16         Limits { connections, .. }
+connections at once         64         Limits { connections, .. }
 read and write timeout      15s        Limits { timeout, .. }
 wait for the next request   5s         Limits { idle, .. }
 requests per connection     100        Limits { per_connection, .. }
@@ -70,8 +70,8 @@ A connection past the limit gets `503 busy` and is closed. `transfer-encoding` i
 A connection is reused until the client says `Connection: close`, the request is HTTP/1.0 without
 `Connection: keep-alive`, `per_connection` requests have been answered, or nothing arrives within
 `idle`. The last answer on a connection says `Connection: close`, so a client is never left waiting
-on a socket the server is about to drop. A connection slot is held for the whole conversation, which
-is why `idle` is short.
+on a socket the server is about to drop. A connection slot is held for the whole conversation, which is why
+`idle` is short and why there are 64 of them: a browser opens several per origin.
 
 ## Working on
 
