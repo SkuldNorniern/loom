@@ -80,6 +80,13 @@ impl Response {
         self.with("set-cookie", cookie)
     }
 
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(held, _)| held.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
     pub fn head(&self) -> String {
         let mut head = format!(
             "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\
@@ -149,6 +156,14 @@ mod tests {
             body,
             r#"{"error":{"code":"bad","message":"no","field":"name","request_id":"7-1"}}"#
         );
+    }
+
+    #[test]
+    fn header_that_was_set_can_be_read_back_whatever_case_is_asked() {
+        let held = Response::text("x").with_cookie("session=abc; HttpOnly");
+        assert_eq!(held.header("set-cookie"), Some("session=abc; HttpOnly"));
+        assert_eq!(held.header("Set-Cookie"), Some("session=abc; HttpOnly"));
+        assert_eq!(held.header("content-type"), None);
     }
 
     #[test]

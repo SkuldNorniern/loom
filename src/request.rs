@@ -58,6 +58,23 @@ impl Request {
             .filter(|held| !held.is_empty())
     }
 
+    pub fn cookie(&self, name: &str) -> Option<&str> {
+        self.header("cookie")?
+            .split(';')
+            .filter_map(|pair| pair.split_once('='))
+            .map(|(key, value)| (key.trim(), value.trim()))
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value)
+    }
+
+    pub fn cookies(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.header("cookie")
+            .unwrap_or_default()
+            .split(';')
+            .filter_map(|pair| pair.split_once('='))
+            .map(|(key, value)| (key.trim(), value.trim()))
+    }
+
     pub fn form(&self) -> HashMap<String, String> {
         percent::pairs(&String::from_utf8_lossy(&self.body))
             .collect::<Vec<_>>()
@@ -129,6 +146,33 @@ mod tests {
         assert_eq!(bare.unwrap().bearer(), None);
         let basic = Request::parse("GET / HTTP/1.1\r\nAuthorization: Basic k\r\n", Vec::new());
         assert_eq!(basic.unwrap().bearer(), None);
+    }
+
+    #[test]
+    fn named_cookie_is_read_from_the_header() {
+        let held = Request::parse(
+            "GET / HTTP/1.1\r\nCookie: first=a; session=abc123; last=z\r\n",
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(held.cookie("session"), Some("abc123"));
+        assert_eq!(held.cookie("first"), Some("a"));
+        assert_eq!(held.cookie("last"), Some("z"));
+        assert_eq!(held.cookie("missing"), None);
+        assert_eq!(held.cookies().count(), 3);
+    }
+
+    #[test]
+    fn request_without_cookie_header_has_no_cookies() {
+        let held = Request::parse("GET / HTTP/1.1\r\nHost: x\r\n", Vec::new()).unwrap();
+        assert_eq!(held.cookie("session"), None);
+        assert_eq!(held.cookies().count(), 0);
+    }
+
+    #[test]
+    fn cookie_value_holding_equals_keeps_everything_after_first_one() {
+        let held = Request::parse("GET / HTTP/1.1\r\nCookie: t=a=b=c\r\n", Vec::new()).unwrap();
+        assert_eq!(held.cookie("t"), Some("a=b=c"));
     }
 
     #[test]
