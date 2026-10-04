@@ -1,21 +1,24 @@
 # loom
 
-HTTP/1.1 server for Rust with no dependencies. Every limit is fixed and stated, and the caller
-decides policy the server would otherwise guess.
+HTTP/1.1 server for Rust. No dependencies. Limits are fixed and stated, and the caller sets the
+policy the server would otherwise guess.
 
-Grown out of the admin API of a DLP console, where it had been serving a wasm console, file
-uploads and an agent protocol.
+Came out of the admin API of a DLP console, which it still serves.
 
 ## What is here
 
-- `Request` — method, path, decoded query, lowercased headers, body, caller address, request id
-- `Response` — status, content type, body, extra headers; header values holding control characters
-  are dropped rather than allowed to split the response
+- `Request` — `Method`, path, decoded query, `Headers`, body, caller address, request id, plus
+  `cookie(name)`, `bearer()`, `form()`, `segments()`
+- `Headers` — case-insensitive, keeps every value of a name that arrived twice. `get` answers the
+  first, `all` answers them in order
+- `Method` — the seven it knows, `Other(String)` for the rest, kept as written
+- `Response` — status, content type, body, extra headers. A header value with control characters is
+  dropped, so it cannot split the response
 - `Server` — bounded connections, read and write timeouts, header and body limits, per-route body
-  limit, a refusal callback
-- `Router` — method and path matching with `:name` captures and a trailing `*rest`; answers 405
-  naming what the route does take, and 404 otherwise
-- `json` — a writer for response bodies, escaping `<` and every control character
+  limit, refusal callback
+- `Router` — method and path matching, `:name` captures, trailing `*rest`. 405 names what the route
+  takes, 404 otherwise
+- `json` — writer for response bodies, escapes `<` and control characters
 - `percent` — decode and encode, `pairs` for query and form bodies
 - `status` — reason phrases
 
@@ -39,9 +42,9 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
-A handler takes `(&Request, &Params)` and returns a `Response`. Captures arrive already
-percent-decoded. An exact segment is preferred over a capture at the same depth, and `*rest` must
-be last and must match at least one segment.
+A handler takes `(&Request, &Params)` and returns a `Response`. Captures arrive percent-decoded. An
+exact segment wins over a capture at the same depth. `*rest` must be last and must match at least
+one segment.
 
 ```
 cargo run --example hello
@@ -57,10 +60,11 @@ cargo run --example hello
 | connections handled at once | 16 | `Limits { connections, .. }` |
 | read and write timeout | 15s | `Limits { timeout, .. }` |
 
-A connection past the limit is answered `503 busy` and closed. `transfer-encoding` is refused:
-send `content-length`.
+A connection past the limit gets `503 busy` and is closed. `transfer-encoding` is refused, send
+`content-length`.
 
-## Not here
+## Working on
 
-One thread per connection, one request per connection, no keep-alive, no TLS, no async, no
-middleware, no compression, no static-file responder. HTTP/1.1 to the extent an admin API needs it.
+One thread per connection, one request per connection. No keep-alive, chunked transfer or streaming
+bodies yet; the body is a `Vec<u8>` and the `Body` split waits until something streams. No TLS,
+async, middleware or compression. See `loom_plan.md`.
