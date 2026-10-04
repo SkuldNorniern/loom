@@ -1,4 +1,6 @@
+pub mod header;
 pub mod json;
+pub mod method;
 pub mod percent;
 pub mod request;
 pub mod response;
@@ -6,6 +8,8 @@ pub mod router;
 pub mod server;
 pub mod status;
 
+pub use header::Headers;
+pub use method::Method;
 pub use request::Request;
 pub use response::Response;
 pub use router::{Params, Router};

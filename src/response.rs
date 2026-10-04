@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use crate::header::Headers;
 use crate::json::Json;
 use crate::status;
 
@@ -7,7 +8,7 @@ pub struct Response {
     pub status: u16,
     pub content_type: String,
     pub body: Vec<u8>,
-    pub headers: Vec<(String, String)>,
+    pub headers: Headers,
 }
 
 impl Response {
@@ -16,7 +17,7 @@ impl Response {
             status: 200,
             content_type: content_type.into(),
             body,
-            headers: Vec::new(),
+            headers: Headers::new(),
         }
     }
 
@@ -72,7 +73,12 @@ impl Response {
     }
 
     pub fn with(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.push((name.into(), value.into()));
+        self.headers.insert(name, value);
+        self
+    }
+
+    pub fn adding(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.add(name, value);
         self
     }
 
@@ -81,10 +87,7 @@ impl Response {
     }
 
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(held, _)| held.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+        self.headers.get(name)
     }
 
     pub fn head(&self) -> String {
@@ -96,7 +99,7 @@ impl Response {
             self.content_type,
             self.body.len()
         );
-        for (name, value) in &self.headers {
+        for (name, value) in self.headers.iter() {
             if name.bytes().any(is_control) || value.bytes().any(is_control) {
                 continue;
             }
@@ -164,6 +167,16 @@ mod tests {
         assert_eq!(held.header("set-cookie"), Some("session=abc; HttpOnly"));
         assert_eq!(held.header("Set-Cookie"), Some("session=abc; HttpOnly"));
         assert_eq!(held.header("content-type"), None);
+    }
+
+    #[test]
+    fn two_cookies_can_both_be_set() {
+        let held = Response::text("x")
+            .adding("set-cookie", "a=1")
+            .adding("set-cookie", "b=2");
+        let head = held.head();
+        assert!(head.contains("set-cookie: a=1\r\n"), "{head}");
+        assert!(head.contains("set-cookie: b=2\r\n"), "{head}");
     }
 
     #[test]

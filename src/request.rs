@@ -2,16 +2,18 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::header::Headers;
+use crate::method::Method;
 use crate::percent;
 use crate::response::Response;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     pub id: String,
-    pub method: String,
+    pub method: Method,
     pub path: String,
     pub query: HashMap<String, String>,
-    pub headers: HashMap<String, String>,
+    pub headers: Headers,
     pub from: String,
     pub body: Vec<u8>,
 }
@@ -23,14 +25,14 @@ impl Request {
 
     pub fn parse_from(head: &str, body: Vec<u8>, from: String) -> Option<Self> {
         let mut parts = head.lines().next()?.split_whitespace();
-        let method = parts.next()?.to_owned();
+        let method = Method::of_str(parts.next()?);
         let target = parts.next()?;
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
-        let headers = head
+        let headers: Headers = head
             .lines()
             .skip(1)
             .filter_map(|line| line.split_once(':'))
-            .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+            .map(|(name, value)| (name.trim().to_owned(), value.trim().to_owned()))
             .collect();
         Some(Self {
             id: next_id(),
@@ -48,7 +50,11 @@ impl Request {
     }
 
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(name).map(String::as_str)
+        self.headers.get(name)
+    }
+
+    pub fn headers_named(&self, name: &str) -> impl Iterator<Item = &str> {
+        self.headers.all(name)
     }
 
     pub fn bearer(&self) -> Option<&str> {
@@ -118,7 +124,7 @@ mod tests {
         let head = "GET /api/incidents?status=new&note=%ED%99%8D+%EA%B8%B8 HTTP/1.1\r\nHost: x\r\n";
         let request = Request::parse(head, Vec::new()).unwrap();
         assert!(!request.id.is_empty());
-        assert_eq!(request.method, "GET");
+        assert_eq!(request.method, Method::Get);
         assert_eq!(request.segments(), ["api", "incidents"]);
         assert_eq!(request.query("status"), Some("new"));
         assert_eq!(request.query("note"), Some("홍 길"));
@@ -136,6 +142,24 @@ mod tests {
     fn header_names_match_whatever_case_they_arrived_in() {
         let request = Request::parse("GET / HTTP/1.1\r\nX-Token: abc\r\n", Vec::new()).unwrap();
         assert_eq!(request.header("x-token"), Some("abc"));
+        assert_eq!(request.header("X-Token"), Some("abc"));
+    }
+
+    #[test]
+    fn a_header_sent_twice_keeps_both_values() {
+        let request =
+            Request::parse("GET / HTTP/1.1\r\nX-Try: one\r\nX-Try: two\r\n", Vec::new()).unwrap();
+        assert_eq!(request.header("x-try"), Some("one"));
+        assert_eq!(
+            request.headers_named("x-try").collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+    }
+
+    #[test]
+    fn an_unknown_method_is_carried_as_written() {
+        let request = Request::parse("PROPFIND / HTTP/1.1\r\n", Vec::new()).unwrap();
+        assert_eq!(request.method.as_str(), "PROPFIND");
     }
 
     #[test]

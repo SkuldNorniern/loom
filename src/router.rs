@@ -1,3 +1,4 @@
+use crate::method::Method;
 use crate::request::Request;
 use crate::response::Response;
 
@@ -27,7 +28,7 @@ impl Params {
 type Answer = Box<dyn Fn(&Request, &Params) -> Response + Send + Sync>;
 
 struct Route {
-    method: String,
+    method: Method,
     pattern: String,
     answer: Answer,
 }
@@ -50,7 +51,7 @@ impl Router {
         answer: impl Fn(&Request, &Params) -> Response + Send + Sync + 'static,
     ) -> Self {
         self.routes.push(Route {
-            method: method.to_ascii_uppercase(),
+            method: Method::of_str(&method.to_ascii_uppercase()),
             pattern: pattern.to_owned(),
             answer: Box::new(answer),
         });
@@ -100,7 +101,7 @@ impl Router {
                 return (route.answer)(request, &params);
             }
             if !allowed.contains(&route.method.as_str()) {
-                allowed.push(&route.method);
+                allowed.push(route.method.as_str());
             }
         }
         if !allowed.is_empty() {
