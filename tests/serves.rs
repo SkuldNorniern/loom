@@ -557,6 +557,49 @@ fn a_request_that_trickles_in_is_refused_when_its_time_runs_out() {
 }
 
 #[test]
+fn a_body_taking_longer_than_arrival_but_keeping_up_is_not_cut_off() {
+    let at = listening(
+        Server::new(routed)
+            .limits(Limits {
+                arrival: Some(Duration::from_millis(100)),
+                slowest: Some(1024),
+                ..Limits::default()
+            })
+            .body_limit(|_, _| 1024 * 1024),
+    );
+    let stream = TcpStream::connect(&at).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let block = vec![b'x'; 4096];
+    let whole = block.len() * 8;
+    writer
+        .write_all(
+            format!("POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: {whole}\r\n\r\n")
+                .as_bytes(),
+        )
+        .unwrap();
+    let since = Instant::now();
+    for _ in 0..8 {
+        writer.write_all(&block).unwrap();
+        writer.flush().unwrap();
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        since.elapsed() > Duration::from_millis(100),
+        "the upload outlasted arrival on purpose"
+    );
+    let said = one_answer(&mut reader);
+    assert!(
+        said.ends_with(&format!("{whole} bytes")),
+        "a body above the floor rate is read however long it takes: {said}"
+    );
+}
+
+#[test]
 fn a_connection_kept_open_and_then_left_alone_is_closed_without_an_answer() {
     let at = listening(Server::new(routed).limits(Limits {
         idle: Some(Duration::from_millis(200)),

@@ -18,6 +18,7 @@ pub struct Limits {
     pub per_connection: usize,
     pub drain: Option<Duration>,
     pub arrival: Option<Duration>,
+    pub slowest: Option<u64>,
 }
 
 impl Default for Limits {
@@ -31,6 +32,7 @@ impl Default for Limits {
             per_connection: 100,
             drain: Some(Duration::from_secs(10)),
             arrival: Some(Duration::from_secs(30)),
+            slowest: Some(16 * 1024),
         }
     }
 }
@@ -120,6 +122,7 @@ impl Server {
                         body: limits.body,
                         body_limit: body_limit.as_deref(),
                         arrival: limits.arrival,
+                        slowest: limits.slowest,
                     };
                     let (reader, writer) = link.both();
                     let Some(answer) = http1::answer(
@@ -159,6 +162,7 @@ mod tests {
         assert_eq!(limits.per_connection, 100);
         assert_eq!(limits.drain, Some(Duration::from_secs(10)));
         assert_eq!(limits.arrival, Some(Duration::from_secs(30)));
+        assert_eq!(limits.slowest, Some(16 * 1024));
     }
 
     #[test]
@@ -172,6 +176,7 @@ mod tests {
             per_connection: 0,
             drain: None,
             arrival: None,
+            slowest: None,
         };
         assert_eq!(
             limits.body,
@@ -188,5 +193,6 @@ mod tests {
             limits.arrival.is_none(),
             "none lets a request take its time"
         );
+        assert!(limits.slowest.is_none(), "and sets no floor on its rate");
     }
 }

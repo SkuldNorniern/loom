@@ -173,7 +173,8 @@ body, per route             caller     .body_limit(|method, path| ...)
 connections at once         64         Limits { connections, .. }
 read and write timeout      15s        Limits { timeout, .. }
 wait for the next request   5s         Limits { idle, .. }
-whole request arrives in    30s        Limits { arrival, .. }
+grace before rate is held   30s        Limits { arrival, .. }
+slowest body loom will read  16 KiB/s   Limits { slowest, .. }
 requests per connection     100        Limits { per_connection, .. }
 drain before serve returns  10s        Limits { drain, .. }
 ```
@@ -202,10 +203,15 @@ The body limit is the one worth keeping. A body is read whole into memory before
 `usize::MAX` lets one request take the machine's memory with it. Raise it for the route that needs
 it and leave the rest of the server out of it.
 
-`arrival` is what stops a client that sends a request one byte at a time. Per-read timeouts never
-fire against it, because every read does arrive. The clock starts when loom begins reading a request
-and is checked at every read boundary, so a trickle is `408` instead of a thread held open for as
-long as the client feels like it.
+`arrival` and `slowest` are what stop a client that sends a request one byte at a time. Per-read
+timeouts never fire against that, because every read does arrive. For the first `arrival` loom reads
+whatever comes. After it, the request has to have averaged `slowest` bytes a second or it is `408`,
+checked at every read boundary.
+
+A rate, not a deadline, because a deadline is only right while bodies are small: 128 MiB inside 30s
+needs 4.3 MB/s, so a flat deadline would refuse a perfectly ordinary upload over a slow link. A
+trickle fails the rate within a second of the grace running out, however long it intends to keep
+going.
 
 ## Stopping
 
