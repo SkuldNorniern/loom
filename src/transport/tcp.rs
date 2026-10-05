@@ -30,6 +30,10 @@ impl Link {
         &mut self.writer
     }
 
+    pub fn both(&mut self) -> (&mut BufReader<TcpStream>, &mut TcpStream) {
+        (&mut self.reader, &mut self.writer)
+    }
+
     pub fn wait_for(&self, held: Option<Duration>) {
         let _ = self.writer.set_read_timeout(held);
     }

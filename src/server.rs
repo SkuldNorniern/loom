@@ -104,8 +104,10 @@ impl Server {
                         body: limits.body,
                         body_limit: body_limit.as_deref(),
                     };
+                    let (reader, writer) = link.both();
                     let Some(answer) = http1::answer(
-                        link.reader(),
+                        reader,
+                        writer,
                         &from,
                         held,
                         handler.as_ref(),

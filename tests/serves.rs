@@ -328,6 +328,60 @@ fn one_panic_does_not_take_the_server_with_it() {
 }
 
 #[test]
+fn a_client_that_asks_to_continue_is_told_so_before_it_sends_its_body() {
+    let at = listening(Server::new(routed));
+    let stream = TcpStream::connect(&at).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+
+    writer
+        .write_all(
+            b"POST /upload HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n",
+        )
+        .unwrap();
+    writer.flush().unwrap();
+
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(line, "HTTP/1.1 100 Continue\r\n");
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(line, "\r\n");
+
+    writer.write_all(b"abcd").unwrap();
+    writer.flush().unwrap();
+    assert!(one_answer(&mut reader).ends_with("4 bytes"));
+}
+
+#[test]
+fn a_body_too_large_is_refused_before_it_is_uploaded() {
+    let at = listening(Server::new(routed).body_limit(|_, _| 8));
+    let stream = TcpStream::connect(&at).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+
+    writer
+        .write_all(
+            b"POST /upload HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 4096\r\n\r\n",
+        )
+        .unwrap();
+    writer.flush().unwrap();
+
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(
+        line, "HTTP/1.1 413 Content Too Large\r\n",
+        "a client asking to continue hears no before it sends 4 KiB"
+    );
+}
+
+#[test]
 fn a_chunked_body_arrives_whole() {
     let at = listening(Server::new(routed));
     let said = ask(

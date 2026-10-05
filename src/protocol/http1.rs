@@ -59,6 +59,7 @@ fn line_of(head: &str) -> (&str, &str) {
 
 pub fn read(
     reader: &mut impl BufRead,
+    interim: &mut impl Write,
     from: &str,
     held: Reading<'_>,
 ) -> Result<Option<Request>, Refusal> {
@@ -68,8 +69,14 @@ pub fn read(
     let framed = framing(&head).map_err(|refusal| refusal.about(&head))?;
     let (method, path) = line_of(&head);
     let limit = held.body_limit.map_or(held.body, |of| of(method, path));
+    let asked_to_continue = wants_continue(&head);
     let body = match framed {
-        Framing::Chunked => read_chunked(reader, limit).map_err(|refusal| refusal.about(&head))?,
+        Framing::Chunked => {
+            if asked_to_continue {
+                go_ahead(interim);
+            }
+            read_chunked(reader, limit).map_err(|refusal| refusal.about(&head))?
+        }
         Framing::Length(length) => {
             if length > limit {
                 return Err(Refusal::new(
@@ -83,6 +90,9 @@ pub fn read(
                 )
                 .about(&head));
             }
+            if asked_to_continue {
+                go_ahead(interim);
+            }
             let mut body = vec![0; length];
             if length > 0 && reader.read_exact(&mut body).is_err() {
                 return Err(Refusal::new(400, "bad_request", "body ended early").about(&head));
@@ -91,6 +101,26 @@ pub fn read(
         }
     };
     Ok(Request::parse_from(&head, body, from.to_owned()))
+}
+
+fn wants_continue(head: &str) -> bool {
+    let line = head.lines().next().unwrap_or_default();
+    if line.split_whitespace().nth(2) == Some("HTTP/1.0") {
+        return false;
+    }
+    head.lines().skip(1).any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("expect")
+                && value
+                    .split(',')
+                    .any(|held| held.trim().eq_ignore_ascii_case("100-continue"))
+        })
+    })
+}
+
+fn go_ahead(out: &mut impl Write) {
+    let _ = out.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+    let _ = out.flush();
 }
 
 fn read_head(reader: &mut impl BufRead, most: usize) -> Result<Option<String>, Refusal> {
@@ -291,12 +321,13 @@ pub struct Answer {
 
 pub fn answer(
     reader: &mut impl BufRead,
+    interim: &mut impl Write,
     from: &str,
     held: Reading<'_>,
     handler: &Answering,
     told: Option<&Telling>,
 ) -> Option<Answer> {
-    match read(reader, from, held) {
+    match read(reader, interim, from, held) {
         Ok(Some(request)) => {
             let keep = request.wants_keeping_alive();
             let with_body = request.method != Method::Head;
