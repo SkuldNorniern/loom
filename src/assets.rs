@@ -10,7 +10,7 @@ pub fn under(request: &Request, root: &Path, path: &str) -> Response {
     };
     let tag = tag_of(&held);
     if let Some(tag) = &tag
-        && asked_for(request, tag)
+        && holds(request, tag)
     {
         return Response::not_modified(tag).revalidated();
     }
@@ -106,7 +106,7 @@ pub fn tag_of(path: &Path) -> Option<String> {
     Some(format!("\"{:x}-{:x}\"", held.len(), changed.as_millis()))
 }
 
-fn asked_for(request: &Request, tag: &str) -> bool {
+pub fn holds(request: &Request, tag: &str) -> bool {
     request.headers_named("if-none-match").any(|held| {
         held.split(',')
             .map(str::trim)
