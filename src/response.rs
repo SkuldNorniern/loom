@@ -29,8 +29,8 @@ impl Response {
         Self::bytes("text/html; charset=utf-8", body.into().into_bytes())
     }
 
-    pub fn page(title: &str, with: impl FnOnce(&mut crate::html::Ui)) -> Self {
-        Self::html(crate::html::Ui::page(title, with))
+    pub fn ui(held: crate::html::Ui) -> Self {
+        Self::html(held.finish())
     }
 
     pub fn json(body: impl Into<String>) -> Self {
@@ -196,11 +196,14 @@ mod tests {
 
     #[test]
     fn a_page_is_served_as_html_with_its_doctype() {
-        let held = Response::page("명부", |ui| ui.h1("명부"));
+        let mut page = crate::html::Ui::page("명부");
+        page.h1("명부");
+        let held = Response::ui(page);
         assert_eq!(held.content_type, "text/html; charset=utf-8");
         let body = String::from_utf8(held.body).unwrap();
         assert!(body.starts_with("<!doctype html>"), "{body}");
         assert!(body.contains("<h1>명부</h1>"), "{body}");
+        assert!(body.ends_with("</body></html>"), "{body}");
     }
 
     #[test]

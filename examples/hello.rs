@@ -1,7 +1,7 @@
 use std::net::TcpListener;
 
 use loom::json::Json;
-use loom::{Limits, Params, Request, Response, Router, Server};
+use loom::{Limits, Params, Request, Response, Router, Server, Ui};
 
 fn main() -> std::io::Result<()> {
     let at = std::env::args().nth(1).unwrap_or("127.0.0.1:8099".into());
@@ -10,20 +10,21 @@ fn main() -> std::io::Result<()> {
 
     let router = Router::new()
         .get("/", |_: &Request, _: &Params| {
-            Response::page("loom", |ui| {
-                ui.main(|ui| {
-                    ui.h1("loom");
-                    ui.p("HTTP/1.1 server for Rust. No dependencies.");
-                    ui.element("ul", |ui| {
-                        for (where_to, what) in [
-                            ("/who/world", "a captured segment"),
-                            ("/upload", "a body, by content-length or chunked"),
-                        ] {
-                            ui.element("li", |ui| ui.link(where_to, what));
-                        }
-                    });
-                })
-            })
+            let mut page = Ui::page("loom");
+            {
+                let mut main = page.open("main");
+                main.h1("loom");
+                main.p("HTTP/1.1 server for Rust. No dependencies.");
+                let mut list = main.open("ul");
+                for (where_to, what) in [
+                    ("/who/world", "a captured segment"),
+                    ("/upload", "a body, by content-length or chunked"),
+                ] {
+                    let mut item = list.open("li");
+                    item.link(where_to, what);
+                }
+            }
+            Response::ui(page)
         })
         .get("/who/:name", |request: &Request, held: &Params| {
             Response::json(
