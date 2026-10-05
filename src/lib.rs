@@ -8,6 +8,7 @@ pub mod json;
 pub mod method;
 pub mod percent;
 pub mod protocol;
+pub mod reload;
 pub mod request;
 pub mod response;
 pub mod router;

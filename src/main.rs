@@ -56,7 +56,7 @@ Flags
   loom dev -- 127.0.0.1:8099
   loom run -- 0.0.0.0:80
 
-loom dev rebuilds and restarts the server. It does not reload the browser.
+loom dev rebuilds and restarts the server, and a page it served reloads itself once it is back.
 ",
         env!("CARGO_PKG_VERSION")
     )
@@ -102,7 +102,7 @@ struct Project {
     client: Option<(PathBuf, String)>,
 }
 
-fn here() -> Result<Project, String> {
+fn here(_asked: Option<&Path>) -> Result<Project, String> {
     let server = named(Path::new("Cargo.toml"))
         .ok_or("no Cargo.toml here, so there is no server to build. loom new <name> makes one")?;
     let at = PathBuf::from("client");
@@ -131,7 +131,7 @@ fn named(manifest: &Path) -> Option<String> {
 
 fn build(args: &[&str]) -> Result<Flags, String> {
     let held = flags(args)?;
-    let project = here()?;
+    let project = here(None)?;
     let since = Instant::now();
     let public = held.out.join("public");
     std::fs::create_dir_all(&public).map_err(|error| format!("{}: {error}", public.display()))?;
@@ -247,6 +247,7 @@ fn dev(args: &[&str]) -> Result<(), String> {
 fn started(server: &Path, theirs: &[String]) -> Result<Child, String> {
     Command::new(server)
         .args(theirs)
+        .env(loom::reload::ASKED_BY, "1")
         .spawn()
         .map_err(|error| format!("{}: {error}", server.display()))
 }
@@ -468,13 +469,9 @@ mod tests {
             assert!(held.contains(command), "{command} is missing");
         }
         assert!(held.contains("loom dev"));
-        for later in ["loom preview", "--hot", "reload the browser\n"] {
+        for later in ["loom preview", "--hot"] {
             assert!(!held.contains(later), "{later} does not exist yet");
         }
-        assert!(
-            held.contains("does not reload the browser"),
-            "dev says what it does not do"
-        );
     }
 
     #[test]

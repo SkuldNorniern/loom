@@ -51,9 +51,14 @@ pub struct Server {
 
 impl Server {
     pub fn new(handler: impl Fn(&Request) -> Response + Send + Sync + 'static) -> Self {
+        let handler: Handler = if crate::reload::asked() {
+            Box::new(crate::reload::around(handler))
+        } else {
+            Box::new(handler)
+        };
         Self {
             limits: Limits::default(),
-            handler: Box::new(handler),
+            handler,
             body_limit: None,
             on_refusal: None,
             stop: Stop::new(),
