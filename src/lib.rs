@@ -1,3 +1,4 @@
+pub mod assets;
 pub mod header;
 pub mod html;
 pub mod json;
