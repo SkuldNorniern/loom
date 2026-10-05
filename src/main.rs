@@ -49,6 +49,7 @@ Flags
 
   --release           build optimised, which loom run does anyway
   --outdir <dir>      where build writes, default dist
+  --client <dir>      the wasm client, default client/ when it is there
   --quiet             only say what failed
   --                  everything after it goes to the server
 
@@ -65,6 +66,7 @@ loom dev rebuilds and restarts the server, and a page it served reloads itself o
 struct Flags {
     release: bool,
     out: PathBuf,
+    client: Option<PathBuf>,
     quiet: bool,
     theirs: Vec<String>,
 }
@@ -73,6 +75,7 @@ fn flags(args: &[&str]) -> Result<Flags, String> {
     let mut held = Flags {
         release: false,
         out: PathBuf::from("dist"),
+        client: None,
         quiet: false,
         theirs: Vec::new(),
     };
@@ -81,6 +84,13 @@ fn flags(args: &[&str]) -> Result<Flags, String> {
         match *arg {
             "--release" => held.release = true,
             "--quiet" | "-q" => held.quiet = true,
+            "--client" => {
+                held.client = Some(
+                    args.next()
+                        .map(PathBuf::from)
+                        .ok_or("--client wants a directory")?,
+                );
+            }
             "--outdir" => {
                 held.out = args
                     .next()
@@ -102,12 +112,59 @@ struct Project {
     client: Option<(PathBuf, String)>,
 }
 
-fn here(_asked: Option<&Path>) -> Result<Project, String> {
-    let server = named(Path::new("Cargo.toml"))
+fn here(asked: Option<&Path>) -> Result<Project, String> {
+    let manifest = Path::new("Cargo.toml");
+    let server = named(manifest)
         .ok_or("no Cargo.toml here, so there is no server to build. loom new <name> makes one")?;
-    let at = PathBuf::from("client");
-    let client = named(&at.join("Cargo.toml")).map(|held| (at, held));
+    if for_wasm(manifest) {
+        return Err(format!(
+            "{server} is a wasm client, not a server: it builds a cdylib. run loom from the \
+             project that serves it, the one with src/main.rs"
+        ));
+    }
+    if !serves(manifest) {
+        return Err(format!(
+            "{server} builds no binary: there is no src/main.rs and no [[bin]] in its Cargo.toml"
+        ));
+    }
+    let at = asked.map(Path::to_owned).unwrap_or(PathBuf::from("client"));
+    let client = match named(&at.join("Cargo.toml")) {
+        Some(held) if for_wasm(&at.join("Cargo.toml")) => Some((at, held)),
+        Some(held) => {
+            return Err(format!(
+                "{held} in {} is not a wasm client: its Cargo.toml has no crate-type cdylib",
+                at.display()
+            ));
+        }
+        None if asked.is_some() => return Err(format!("no Cargo.toml in {}", at.display())),
+        None => None,
+    };
     Ok(Project { server, client })
+}
+
+fn serves(manifest: &Path) -> bool {
+    if Path::new("src/main.rs").is_file() {
+        return true;
+    }
+    std::fs::read_to_string(manifest).is_ok_and(|held| held.contains("[[bin]]"))
+}
+
+fn for_wasm(manifest: &Path) -> bool {
+    let Ok(held) = std::fs::read_to_string(manifest) else {
+        return false;
+    };
+    let mut inside = false;
+    for line in held.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            inside = line == "[lib]";
+            continue;
+        }
+        if inside && line.starts_with("crate-type") && line.contains("cdylib") {
+            return true;
+        }
+    }
+    false
 }
 
 fn named(manifest: &Path) -> Option<String> {
@@ -131,7 +188,7 @@ fn named(manifest: &Path) -> Option<String> {
 
 fn build(args: &[&str]) -> Result<Flags, String> {
     let held = flags(args)?;
-    let project = here(None)?;
+    let project = here(held.client.as_deref())?;
     let since = Instant::now();
     let public = held.out.join("public");
     std::fs::create_dir_all(&public).map_err(|error| format!("{}: {error}", public.display()))?;
