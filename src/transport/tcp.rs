@@ -8,7 +8,7 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Opening {
     pub connections: usize,
-    pub timeout: Duration,
+    pub timeout: Option<Duration>,
 }
 
 pub struct Link {
@@ -30,8 +30,8 @@ impl Link {
         &mut self.writer
     }
 
-    pub fn wait_for(&self, held: Duration) {
-        let _ = self.writer.set_read_timeout(Some(held));
+    pub fn wait_for(&self, held: Option<Duration>) {
+        let _ = self.writer.set_read_timeout(held);
     }
 }
 
@@ -55,8 +55,8 @@ pub fn listen(
         thread::spawn(move || {
             let _slot = slot;
             let _ = stream.set_nodelay(true);
-            let _ = stream.set_write_timeout(Some(opening.timeout));
-            let _ = stream.set_read_timeout(Some(opening.timeout));
+            let _ = stream.set_write_timeout(opening.timeout);
+            let _ = stream.set_read_timeout(opening.timeout);
             let from = stream
                 .peer_addr()
                 .map(|address| address.ip().to_string())

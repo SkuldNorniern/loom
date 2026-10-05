@@ -12,8 +12,8 @@ pub struct Limits {
     pub header: usize,
     pub body: usize,
     pub connections: usize,
-    pub timeout: Duration,
-    pub idle: Duration,
+    pub timeout: Option<Duration>,
+    pub idle: Option<Duration>,
     pub per_connection: usize,
 }
 
@@ -23,8 +23,8 @@ impl Default for Limits {
             header: 16 * 1024,
             body: 1024 * 1024,
             connections: 64,
-            timeout: Duration::from_secs(15),
-            idle: Duration::from_secs(5),
+            timeout: Some(Duration::from_secs(15)),
+            idle: Some(Duration::from_secs(5)),
             per_connection: 100,
         }
     }
@@ -90,8 +90,9 @@ impl Server {
                 let _ = http1::busy().write_to(stream);
             },
             move |link| {
-                let most = limits.per_connection.max(1);
-                for turn in 0..most {
+                let most = limits.per_connection;
+                let mut turn = 0usize;
+                loop {
                     link.wait_for(if turn == 0 {
                         limits.timeout
                     } else {
@@ -112,10 +113,12 @@ impl Server {
                     ) else {
                         return;
                     };
-                    let keep = answer.keep && turn + 1 < most;
+                    let last = most != 0 && turn + 1 >= most;
+                    let keep = answer.keep && !last;
                     if http1::write(link.writer(), answer, keep).is_err() || !keep {
                         return;
                     }
+                    turn += 1;
                 }
             },
         )
@@ -132,8 +135,30 @@ mod tests {
         assert_eq!(limits.header, 16 * 1024);
         assert_eq!(limits.body, 1024 * 1024);
         assert_eq!(limits.connections, 64);
-        assert_eq!(limits.timeout, Duration::from_secs(15));
-        assert_eq!(limits.idle, Duration::from_secs(5));
+        assert_eq!(limits.timeout, Some(Duration::from_secs(15)));
+        assert_eq!(limits.idle, Some(Duration::from_secs(5)));
         assert_eq!(limits.per_connection, 100);
+    }
+
+    #[test]
+    fn every_limit_can_be_waived() {
+        let limits = Limits {
+            header: 1024 * 1024,
+            body: usize::MAX,
+            connections: 4096,
+            timeout: None,
+            idle: None,
+            per_connection: 0,
+        };
+        assert_eq!(
+            limits.body,
+            usize::MAX,
+            "nothing caps what a route may accept"
+        );
+        assert!(limits.timeout.is_none(), "none waits as long as it takes");
+        assert_eq!(
+            limits.per_connection, 0,
+            "zero keeps serving until client closes"
+        );
     }
 }

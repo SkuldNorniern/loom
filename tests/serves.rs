@@ -255,6 +255,55 @@ fn a_connection_is_closed_after_its_share_of_requests() {
 }
 
 #[test]
+fn no_share_of_requests_keeps_a_connection_open_for_all_of_them() {
+    let at = listening(Server::new(routed).limits(Limits {
+        per_connection: 0,
+        ..Limits::default()
+    }));
+    let stream = TcpStream::connect(&at).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+
+    for turn in 0..300 {
+        writer
+            .write_all(b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
+        writer.flush().unwrap();
+        let said = one_answer(&mut reader);
+        assert!(
+            said.contains("Connection: keep-alive\r\n"),
+            "turn {turn} past the usual share: {said}"
+        );
+    }
+}
+
+#[test]
+fn a_body_as_large_as_the_caller_allows_arrives_whole() {
+    let big = 8 * 1024 * 1024;
+    let at = listening(
+        Server::new(routed)
+            .limits(Limits {
+                body: usize::MAX,
+                ..Limits::default()
+            })
+            .body_limit(move |_, _| big),
+    );
+    let body = "x".repeat(big);
+    let said = ask(
+        &at,
+        &format!(
+            "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert!(said.starts_with("HTTP/1.1 200 OK\r\n"), "{said}");
+    assert!(said.ends_with(&format!("{big} bytes")), "{said}");
+}
+
+#[test]
 fn a_chunked_body_arrives_whole() {
     let at = listening(Server::new(routed));
     let said = ask(
