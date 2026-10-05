@@ -141,6 +141,29 @@ requests per connection     100        Limits { per_connection, .. }
 
 A connection past the limit gets `503 busy` and is closed.
 
+Every one of these is the caller's number, and every one can be waived. `body_limit` answers per
+route, so one upload path may accept what the rest of the server will not. `timeout` and `idle` are
+`Option<Duration>`, and `None` waits as long as the client takes. `per_connection: 0` serves a
+connection until the client closes it.
+
+```rust
+Server::new(handler)
+    .limits(Limits {
+        body: usize::MAX,
+        timeout: None,
+        per_connection: 0,
+        ..Limits::default()
+    })
+    .body_limit(|method, path| match (method, path) {
+        ("POST", "/upload") => 512 * 1024 * 1024,
+        _ => 64 * 1024,
+    })
+```
+
+The body limit is the one worth keeping. A body is read whole into memory before a handler runs, so
+`usize::MAX` means one request can take the machine's memory with it. Raise it for the route that
+needs it; the rest of the server does not have to pay for that route.
+
 ## What a head must look like
 
 Every line ends CRLF. A request line is exactly method, target and version, the version starts
@@ -164,6 +187,22 @@ Response::file(Path::new("ui/dist/app.wasm"))?        // length from the filesys
 Response::reader("text/plain; charset=utf-8", from)   // unknown, so chunked
 ```
 
+## Caching
+
+An answer says `Cache-Control: no-store` unless it is asked for something else, so nothing leaks
+into a shared cache by default.
+
+```rust
+Response::json(body)                  // no-store
+Response::file(path)?.cache_for(600)  // public, max-age=600
+asset.unchanging()                    // a year, immutable, for a hashed filename
+page.without_cache_header()           // say nothing and let a proxy decide
+```
+
+`assets::under` tags every file it serves with an `ETag` of its length and modification time, and
+answers `304` when the client sends that tag back in `If-None-Match`. A `304` and a `204` carry no
+`Content-Type`, no `Content-Length` and no body.
+
 ## Keeping the connection
 
 A connection is reused until the client says `Connection: close`, the request is HTTP/1.0 without
@@ -171,6 +210,10 @@ A connection is reused until the client says `Connection: close`, the request is
 `idle`. The last answer on a connection says `Connection: close`, so a client is never left waiting
 on a socket the server is about to drop. A connection slot is held for the whole conversation, which is why
 `idle` is short and why there are 64 of them: a browser opens several per origin.
+
+An accepted connection is set `TCP_NODELAY`. A head and its body go out as two writes, and without
+it the second one waits on the client's delayed ack: 300 keep-alive requests took 12.3s before and
+0.05s after.
 
 ## Working on
 
