@@ -1,4 +1,5 @@
 pub mod header;
+pub mod html;
 pub mod json;
 pub mod method;
 pub mod percent;
@@ -9,6 +10,7 @@ pub mod server;
 pub mod status;
 
 pub use header::Headers;
+pub use html::Ui;
 pub use method::Method;
 pub use request::Request;
 pub use response::Response;

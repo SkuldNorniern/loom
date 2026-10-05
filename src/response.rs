@@ -29,6 +29,10 @@ impl Response {
         Self::bytes("text/html; charset=utf-8", body.into().into_bytes())
     }
 
+    pub fn page(title: &str, with: impl FnOnce(&mut crate::html::Ui)) -> Self {
+        Self::html(crate::html::Ui::page(title, with))
+    }
+
     pub fn json(body: impl Into<String>) -> Self {
         Self::bytes("application/json; charset=utf-8", body.into().into_bytes())
     }
@@ -188,6 +192,15 @@ mod tests {
         assert_eq!(held.header("set-cookie"), Some("session=abc; HttpOnly"));
         assert_eq!(held.header("Set-Cookie"), Some("session=abc; HttpOnly"));
         assert_eq!(held.header("content-type"), None);
+    }
+
+    #[test]
+    fn a_page_is_served_as_html_with_its_doctype() {
+        let held = Response::page("명부", |ui| ui.h1("명부"));
+        assert_eq!(held.content_type, "text/html; charset=utf-8");
+        let body = String::from_utf8(held.body).unwrap();
+        assert!(body.starts_with("<!doctype html>"), "{body}");
+        assert!(body.contains("<h1>명부</h1>"), "{body}");
     }
 
     #[test]

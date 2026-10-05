@@ -10,7 +10,20 @@ fn main() -> std::io::Result<()> {
 
     let router = Router::new()
         .get("/", |_: &Request, _: &Params| {
-            Response::html("<!doctype html><title>loom</title><h1>loom</h1>")
+            Response::page("loom", |ui| {
+                ui.main(|ui| {
+                    ui.h1("loom");
+                    ui.p("HTTP/1.1 server for Rust. No dependencies.");
+                    ui.element("ul", |ui| {
+                        for (where_to, what) in [
+                            ("/who/world", "a captured segment"),
+                            ("/upload", "a body, by content-length or chunked"),
+                        ] {
+                            ui.element("li", |ui| ui.link(where_to, what));
+                        }
+                    });
+                })
+            })
         })
         .get("/who/:name", |request: &Request, held: &Params| {
             Response::json(
