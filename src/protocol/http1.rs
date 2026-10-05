@@ -300,11 +300,32 @@ pub fn answer(
         Ok(Some(request)) => {
             let keep = request.wants_keeping_alive();
             let with_body = request.method != Method::Head;
-            Some(Answer {
-                response: handler(&request),
-                keep,
-                with_body,
-            })
+            let held = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&request)));
+            match held {
+                Ok(response) => Some(Answer {
+                    response,
+                    keep,
+                    with_body,
+                }),
+                Err(_) => {
+                    if let Some(told) = told {
+                        let mut refusal =
+                            Refusal::new(500, "handler_panicked", "handler did not finish");
+                        refusal.method = request.method.as_str().to_owned();
+                        refusal.path = request.path.clone();
+                        told(from, &refusal);
+                    }
+                    Some(Answer {
+                        response: Response::refused(
+                            500,
+                            "internal_error",
+                            "request could not be answered",
+                        ),
+                        keep: false,
+                        with_body,
+                    })
+                }
+            }
         }
         Ok(None) => None,
         Err(refusal) => {

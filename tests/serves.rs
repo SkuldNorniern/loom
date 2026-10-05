@@ -56,6 +56,7 @@ fn routed(request: &Request) -> Response {
             request.query("name").unwrap_or("world")
         )),
         ["upload"] => Response::text(format!("{} bytes", request.body.len())),
+        ["boom"] => panic!("a handler fell over"),
         ["stream"] => Response::reader(
             "text/plain; charset=utf-8",
             std::io::Cursor::new("한 줄\n두 줄\n".as_bytes().to_vec()),
@@ -301,6 +302,29 @@ fn a_body_as_large_as_the_caller_allows_arrives_whole() {
     );
     assert!(said.starts_with("HTTP/1.1 200 OK\r\n"), "{said}");
     assert!(said.ends_with(&format!("{big} bytes")), "{said}");
+}
+
+#[test]
+fn a_handler_that_panics_is_answered_500_and_the_socket_is_closed() {
+    let at = listening(Server::new(routed));
+    let said = ask(&at, "GET /boom HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(
+        said.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
+        "{said}"
+    );
+    assert!(said.contains("Connection: close\r\n"), "{said}");
+    assert!(
+        !said.contains("fell over"),
+        "what the panic said stays out of the answer: {said}"
+    );
+}
+
+#[test]
+fn one_panic_does_not_take_the_server_with_it() {
+    let at = listening(Server::new(routed));
+    assert!(ask(&at, "GET /boom HTTP/1.1\r\nHost: x\r\n\r\n").contains(" 500 "));
+    let said = ask(&at, "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(said.ends_with("hello world"), "{said}");
 }
 
 #[test]
