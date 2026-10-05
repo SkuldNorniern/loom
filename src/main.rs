@@ -1,7 +1,8 @@
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
-use std::time::Instant;
+use std::process::{Child, Command, ExitCode};
+use std::time::{Duration, Instant, SystemTime};
 
 const BINDGEN: &str = "0.2.128";
 const WEB_SYS: &str = "0.3.77";
@@ -21,6 +22,7 @@ fn main() -> ExitCode {
         ["new", rest @ ..] => new(rest),
         ["build", rest @ ..] => build(rest).map(|_| ()),
         ["run", rest @ ..] => run(rest),
+        ["dev", rest @ ..] => dev(rest),
         [unknown, ..] => Err(format!(
             "`{unknown}` is not a loom command. loom --help lists them"
         )),
@@ -40,18 +42,21 @@ fn help() -> String {
 
   loom new <name>     a server, a wasm client and the wiring between them
   loom build          the client to wasm, the server, then dist/
-  loom run            build, then start the server
+  loom dev            build, start, and build again on every change
+  loom run            build optimised, then start the server
 
 Flags
 
-  --release           optimised, and the server runs from dist/
+  --release           build optimised, which loom run does anyway
   --outdir <dir>      where build writes, default dist
   --quiet             only say what failed
   --                  everything after it goes to the server
 
   loom new shop
-  loom build --release
-  loom run -- 127.0.0.1:8099
+  loom dev -- 127.0.0.1:8099
+  loom run -- 0.0.0.0:80
+
+loom dev rebuilds and restarts the server. It does not reload the browser.
 ",
         env!("CARGO_PKG_VERSION")
     )
@@ -176,7 +181,9 @@ fn build(args: &[&str]) -> Result<Flags, String> {
         return Err(format!("{} was not built", built.display()));
     }
     let server = held.out.join("server");
-    std::fs::copy(&built, &server).map_err(|error| format!("{}: {error}", server.display()))?;
+    let coming = held.out.join("server.coming");
+    std::fs::copy(&built, &coming).map_err(|error| format!("{}: {error}", coming.display()))?;
+    std::fs::rename(&coming, &server).map_err(|error| format!("{}: {error}", server.display()))?;
     say(
         held.quiet,
         &format!("server {} in {}", project.server, took(step)),
@@ -189,7 +196,9 @@ fn build(args: &[&str]) -> Result<Flags, String> {
 }
 
 fn run(args: &[&str]) -> Result<(), String> {
-    let held = build(args)?;
+    let mut asked = vec!["--release"];
+    asked.extend_from_slice(args);
+    let held = build(&asked)?;
     let server = held.out.join("server");
     say(held.quiet, &format!("running {}", server.display()));
     let state = Command::new(&server)
@@ -203,6 +212,87 @@ fn run(args: &[&str]) -> Result<(), String> {
         Some(code) => format!("server stopped with {code}"),
         None => "server was killed".to_owned(),
     })
+}
+
+fn dev(args: &[&str]) -> Result<(), String> {
+    let held = build(args)?;
+    let server = held.out.join("server");
+    let watching = roots(&held.out);
+    let mut seen = seen_at(&watching);
+    say(
+        held.quiet,
+        &format!("watching {} files, ctrl-c to stop", seen.len()),
+    );
+    let mut child = started(&server, &held.theirs)?;
+    loop {
+        std::thread::sleep(Duration::from_millis(300));
+        let now = seen_at(&watching);
+        if now == seen {
+            continue;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        seen = seen_at(&watching);
+        say(held.quiet, "something changed, building");
+        match build(args) {
+            Ok(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                child = started(&server, &held.theirs)?;
+            }
+            Err(why) => eprintln!("loom: {why}, so the server it is running stays up"),
+        }
+    }
+}
+
+fn started(server: &Path, theirs: &[String]) -> Result<Child, String> {
+    Command::new(server)
+        .args(theirs)
+        .spawn()
+        .map_err(|error| format!("{}: {error}", server.display()))
+}
+
+fn roots(out: &Path) -> Vec<PathBuf> {
+    let held = [
+        PathBuf::from("Cargo.toml"),
+        PathBuf::from("src"),
+        PathBuf::from("public"),
+        PathBuf::from("client/Cargo.toml"),
+        PathBuf::from("client/src"),
+    ];
+    held.into_iter()
+        .filter(|path| path.exists() && !path.starts_with(out))
+        .collect()
+}
+
+fn seen_at(roots: &[PathBuf]) -> BTreeMap<PathBuf, SystemTime> {
+    let mut held = BTreeMap::new();
+    for root in roots {
+        gather(root, &mut held);
+    }
+    held
+}
+
+fn gather(at: &Path, held: &mut BTreeMap<PathBuf, SystemTime>) {
+    let Ok(about) = at.metadata() else { return };
+    if about.is_file() {
+        if let Ok(changed) = about.modified() {
+            held.insert(at.to_owned(), changed);
+        }
+        return;
+    }
+    let skip = at
+        .file_name()
+        .and_then(|held| held.to_str())
+        .is_some_and(|held| matches!(held, "target" | "dist" | ".git") || held.starts_with('.'));
+    if skip {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(at) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        gather(&entry.path(), held);
+    }
 }
 
 fn new(args: &[&str]) -> Result<(), String> {
@@ -377,9 +467,14 @@ mod tests {
         for command in ["loom new", "loom build", "loom run"] {
             assert!(held.contains(command), "{command} is missing");
         }
-        for later in ["loom dev", "loom preview", "watch", "hot"] {
+        assert!(held.contains("loom dev"));
+        for later in ["loom preview", "--hot", "reload the browser\n"] {
             assert!(!held.contains(later), "{later} does not exist yet");
         }
+        assert!(
+            held.contains("does not reload the browser"),
+            "dev says what it does not do"
+        );
     }
 
     #[test]
@@ -401,6 +496,34 @@ mod tests {
             PathBuf::from("out")
         );
         assert_eq!(flags(&[]).unwrap().out, PathBuf::from("dist"));
+    }
+
+    #[test]
+    fn watching_skips_what_is_built_and_notices_what_is_edited() {
+        let at = std::env::temp_dir().join(format!("loom-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&at);
+        std::fs::create_dir_all(at.join("src")).unwrap();
+        std::fs::create_dir_all(at.join("target/debug")).unwrap();
+        std::fs::write(at.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(at.join("target/debug/built"), "binary").unwrap();
+
+        let roots = vec![at.join("src"), at.join("target")];
+        let first = seen_at(&roots);
+        assert_eq!(first.len(), 1, "only the source is watched: {first:?}");
+
+        std::thread::sleep(Duration::from_millis(10));
+        std::fs::write(at.join("src/main.rs"), "fn main() { }").unwrap();
+        assert_ne!(seen_at(&roots), first, "an edit is noticed");
+
+        std::fs::write(at.join("target/debug/built"), "new binary").unwrap();
+        let after = seen_at(&roots);
+        std::fs::write(at.join("target/debug/built"), "newer binary").unwrap();
+        assert_eq!(
+            seen_at(&roots),
+            after,
+            "building does not look like an edit"
+        );
+        std::fs::remove_dir_all(&at).unwrap();
     }
 
     #[test]
