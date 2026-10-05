@@ -4,6 +4,35 @@ HTTP/1.1 server for Rust. No dependencies.
 
 Came out of the admin API of a DLP console, which it still serves.
 
+## Its own command
+
+```
+cargo install --path .
+
+loom new shop
+cd shop
+loom run -- 127.0.0.1:8099
+```
+
+`loom new` writes a server, a wasm client and the wiring between them. `loom build` builds the
+client for `wasm32-unknown-unknown`, runs `wasm-bindgen` over it, builds the server, and leaves
+
+```text
+dist/
+├── server
+└── public/
+    ├── shop_client.js
+    └── shop_client_bg.wasm
+```
+
+`loom run` does that and then starts the server, with everything after `--` handed to it.
+`--release` builds both optimised, `--outdir` moves the output, `--quiet` says only what failed.
+Each step prints what it built and how long it took. There is no config file: the server is the
+package you are in, the client is `client/` if it is there, and `public/` is copied if it exists.
+
+`loom dev` and `loom preview` are in `loom_plan.md` and not written yet, so the help does not
+mention them.
+
 ## Use
 
 ```rust
