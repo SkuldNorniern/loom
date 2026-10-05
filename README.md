@@ -19,7 +19,8 @@ Came out of the admin API of a DLP console, which it still serves.
 - `Router`: method and path matching, `:name` captures, trailing `*rest`. 405 names what the route
   takes, 404 otherwise.
 - `Ui`: writes HTML straight out, with no retained tree. Text and attribute values are escaped
-  without being asked; `raw` is the one way past that. `Response::page` wraps a body in a document.
+  without being asked; `raw` is the one way past that. A tag closes when its guard leaves scope,
+  or with `begin` and `close` when the nesting is not lexical.
 - `json`: writer for response bodies. Escapes `<` and control characters.
 - `percent`: decode and encode, `pairs` for query and form bodies.
 - `status`: reason phrases.
@@ -49,16 +50,33 @@ anything is decoded, so `%2F` stays inside its segment and cannot change which r
 Captures arrive percent-decoded. An exact segment wins over a capture at the same depth. `*rest`
 must be last and must match at least one segment.
 
-Answering with HTML:
+Answering with HTML. No closures: a tag closes when its guard goes out of scope.
 
 ```rust
-Response::page("loom", |ui| {
-    ui.main(|ui| {
-        ui.h1("loom");
-        ui.p("escaped unless you ask otherwise");
-    })
-})
+let mut page = Ui::page("loom");
+{
+    let mut main = page.open("main");
+    main.h1("loom");
+    main.p("escaped unless you ask otherwise");
+    let mut list = main.open("ul");
+    list.said("li", "<kept as text>");
+}
+Response::ui(page)
 ```
+
+Where the nesting is not a Rust scope, `begin` and `close` pair up instead:
+
+```rust
+ui.begin_with("table", &[("class", "roster")]);
+ui.begin("tr");
+ui.said("td", "홍길동");
+ui.close();
+ui.close();
+```
+
+`finish` closes anything still open, so an early return cannot emit an unbalanced document, and
+closing more than was opened writes nothing extra. A `HEAD` request is answered by the route that
+answers `GET`, and the server sends that answer without its body.
 
 ```
 cargo run --example hello
