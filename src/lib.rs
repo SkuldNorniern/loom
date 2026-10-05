@@ -1,5 +1,6 @@
 pub mod assets;
 pub mod body;
+pub mod cookie;
 pub mod header;
 pub mod html;
 pub mod json;
@@ -15,6 +16,7 @@ pub mod stop;
 pub mod transport;
 
 pub use body::Body;
+pub use cookie::{Cookie, SameSite};
 pub use header::Headers;
 pub use html::Ui;
 pub use method::Method;
