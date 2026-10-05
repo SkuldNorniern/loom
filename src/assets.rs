@@ -12,7 +12,7 @@ pub fn under(request: &Request, root: &Path, path: &str) -> Response {
     if let Some(tag) = &tag
         && asked_for(request, tag)
     {
-        return Response::not_modified(tag);
+        return Response::not_modified(tag).revalidated();
     }
     let whole = held.metadata().map(|held| held.len()).unwrap_or_default();
     let wanted = asked_range(request, tag.as_deref()).map(|asked| within_file(asked, whole));
@@ -39,7 +39,7 @@ pub fn under(request: &Request, root: &Path, path: &str) -> Response {
             Err(error) => return request.error(500, "read_failed", &error.to_string()),
         },
     };
-    let answer = answer.with("accept-ranges", "bytes");
+    let answer = answer.with("accept-ranges", "bytes").revalidated();
     match tag {
         Some(tag) => answer.with("etag", tag),
         None => answer,
@@ -276,6 +276,20 @@ mod tests {
             "a part of a file the client no longer holds would corrupt it"
         );
         assert_eq!(served(stale), b"0123456789");
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn a_served_file_may_be_kept_but_is_asked_about_before_it_is_used() {
+        let at = tree("revalidate");
+        let whole = under(&asked(), &at, "/index.html");
+        assert_eq!(whole.cache, "no-cache");
+        let tag = whole.header("etag").expect("a tag").to_owned();
+        assert_eq!(
+            under(&asking_with(&tag), &at, "/index.html").cache,
+            "no-cache",
+            "a 304 says the same, so a copy stays usable"
+        );
         fs::remove_dir_all(&at).unwrap();
     }
 

@@ -112,6 +112,11 @@ impl Response {
         self
     }
 
+    pub fn revalidated(mut self) -> Self {
+        self.cache = "no-cache".to_owned();
+        self
+    }
+
     pub fn no_store(mut self) -> Self {
         self.cache = "no-store".to_owned();
         self
