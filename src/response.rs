@@ -44,6 +44,14 @@ impl Response {
         Self::carrying(content_type, Body::Read(Box::new(held)))
     }
 
+    pub fn part(
+        content_type: impl Into<String>,
+        held: impl std::io::Read + Send + 'static,
+        length: u64,
+    ) -> Self {
+        Self::carrying(content_type, Body::Counted(Box::new(held), length))
+    }
+
     pub fn text(body: impl Into<String>) -> Self {
         Self::bytes("text/plain; charset=utf-8", body.into().into_bytes())
     }

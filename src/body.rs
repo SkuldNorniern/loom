@@ -9,6 +9,7 @@ pub enum Body {
     Bytes(Vec<u8>),
     File(std::fs::File),
     Read(Box<dyn Read + Send>),
+    Counted(Box<dyn Read + Send>, u64),
 }
 
 impl std::fmt::Debug for Body {
@@ -18,6 +19,7 @@ impl std::fmt::Debug for Body {
             Self::Bytes(held) => write!(f, "Bytes({} bytes)", held.len()),
             Self::File(_) => f.write_str("File"),
             Self::Read(_) => f.write_str("Read"),
+            Self::Counted(_, length) => write!(f, "Counted({length} bytes)"),
         }
     }
 }
@@ -41,6 +43,7 @@ impl Body {
             Self::Bytes(held) => Some(held.len() as u64),
             Self::File(held) => held.metadata().ok().map(|held| held.len()),
             Self::Read(_) => None,
+            Self::Counted(_, length) => Some(*length),
         }
     }
 
@@ -70,6 +73,11 @@ impl Body {
                 held.read_to_end(&mut out)?;
                 Ok(out)
             }
+            Self::Counted(held, length) => {
+                let mut out = Vec::new();
+                held.take(length).read_to_end(&mut out)?;
+                Ok(out)
+            }
         }
     }
 
@@ -79,6 +87,7 @@ impl Body {
             Self::Bytes(held) => out.write_all(&held),
             Self::File(mut held) => copy(&mut held, out),
             Self::Read(mut held) => copy(&mut held, out),
+            Self::Counted(held, length) => exactly(&mut held.take(length), out, length),
         }
     }
 
@@ -93,6 +102,7 @@ impl Body {
             }
             Self::File(mut held) => chunks(&mut held, out),
             Self::Read(mut held) => chunks(&mut held, out),
+            Self::Counted(held, length) => chunks(&mut held.take(length), out),
         }
     }
 }
@@ -106,6 +116,23 @@ fn copy(from: &mut impl Read, out: &mut impl Write) -> std::io::Result<()> {
         }
         out.write_all(&block[..read])?;
     }
+}
+
+fn exactly(from: &mut impl Read, out: &mut impl Write, length: u64) -> std::io::Result<()> {
+    let mut block = vec![0u8; BLOCK];
+    let mut left = length;
+    while left > 0 {
+        let read = from.read(&mut block)?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "body is shorter than its stated length",
+            ));
+        }
+        out.write_all(&block[..read])?;
+        left -= read as u64;
+    }
+    Ok(())
 }
 
 fn chunks(from: &mut impl Read, out: &mut impl Write) -> std::io::Result<()> {

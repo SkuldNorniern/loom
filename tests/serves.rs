@@ -57,6 +57,13 @@ fn routed(request: &Request) -> Response {
         )),
         ["upload"] => Response::text(format!("{} bytes", request.body.len())),
         ["boom"] => panic!("a handler fell over"),
+        ["part"] => Response::part(
+            "application/octet-stream",
+            std::io::Cursor::new(b"0123456789".to_vec()),
+            4,
+        )
+        .with_status(206)
+        .with("content-range", "bytes 0-3/10"),
         ["slow"] => {
             thread::sleep(Duration::from_millis(300));
             Response::text("took its time")
@@ -438,6 +445,36 @@ fn a_server_asked_to_stop_finishes_what_it_started_and_returns() {
             .unwrap_or(true),
         "nothing is served after it returns"
     );
+}
+
+#[test]
+fn a_body_of_known_length_is_not_chunked_and_the_connection_survives_it() {
+    let at = listening(Server::new(routed));
+    let stream = TcpStream::connect(&at).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+
+    writer
+        .write_all(b"GET /part HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    writer.flush().unwrap();
+    let said = one_answer(&mut reader);
+    assert!(
+        said.starts_with("HTTP/1.1 206 Partial Content\r\n"),
+        "{said}"
+    );
+    assert!(said.contains("Content-Length: 4\r\n"), "{said}");
+    assert!(!said.contains("Transfer-Encoding"), "{said}");
+    assert!(said.ends_with("0123"), "{said}");
+
+    writer
+        .write_all(b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    writer.flush().unwrap();
+    assert!(one_answer(&mut reader).ends_with("hello world"));
 }
 
 #[test]
