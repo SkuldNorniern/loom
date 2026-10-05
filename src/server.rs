@@ -5,8 +5,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use crate::method::Method;
 use crate::request::Request;
 use crate::response::Response;
+
+const MOST_HEADERS: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
@@ -136,10 +139,11 @@ impl Server {
                         limits.idle
                     }));
                     let read = read(&mut reader, &from, limits, body_limit.as_deref());
-                    let (response, keep) = match read {
+                    let (response, keep, with_body) = match read {
                         Ok(Some(request)) => {
                             let keep = request.wants_keeping_alive();
-                            (handler(&request), keep)
+                            let with_body = request.method != Method::Head;
+                            (handler(&request), keep, with_body)
                         }
                         Ok(None) => return,
                         Err(refusal) => {
@@ -149,12 +153,13 @@ impl Server {
                             (
                                 Response::refused(refusal.status, refusal.code, &refusal.message),
                                 false,
+                                true,
                             )
                         }
                     };
                     let last = turn + 1 >= limits.per_connection.max(1);
                     let keep = keep && !last;
-                    if response.write_with(&mut stream, keep).is_err() || !keep {
+                    if response.write_body(&mut stream, keep, with_body).is_err() || !keep {
                         return;
                     }
                 }
@@ -202,6 +207,7 @@ fn read(
 ) -> Result<Option<Request>, Refusal> {
     let head = read_head(reader, limits.header)?;
     let Some(head) = head else { return Ok(None) };
+    checked(&head).map_err(|refusal| refusal.about(&head))?;
     let framed = framing(&head).map_err(|refusal| refusal.about(&head))?;
     let (method, path) = line_of(&head);
     let limit = body_limit.map_or(limits.body, |of| of(method, path));
@@ -269,6 +275,62 @@ fn read_head(reader: &mut impl BufRead, most: usize) -> Result<Option<String>, R
 enum Framing {
     Length(usize),
     Chunked,
+}
+
+fn checked(head: &str) -> Result<(), Refusal> {
+    let bad = |why: &'static str| Refusal::new(400, "bad_head", why);
+    let mut lines = head.split_inclusive('\n');
+    let Some(first) = lines.next() else {
+        return Err(bad("there is no request line"));
+    };
+    if !first.ends_with("\r\n") {
+        return Err(bad("every line of a head ends CRLF"));
+    }
+    let parts: Vec<&str> = first.trim_end().split(' ').collect();
+    if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
+        return Err(bad("a request line is method, target and version"));
+    }
+    if !parts[2].starts_with("HTTP/") {
+        return Err(bad("a request line ends with its HTTP version"));
+    }
+    if parts[1]
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(bad("a request target holds no spaces"));
+    }
+
+    let mut count = 0usize;
+    for line in lines {
+        if !line.ends_with("\r\n") {
+            return Err(bad("every line of a head ends CRLF"));
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            return Err(bad("a folded header line is not read"));
+        }
+        count += 1;
+        if count > MOST_HEADERS {
+            return Err(bad("too many header lines"));
+        }
+        let Some((name, _)) = line.split_once(':') else {
+            return Err(bad("a header line is name, colon, value"));
+        };
+        if name.is_empty() || name.ends_with([' ', '\t']) {
+            return Err(bad("a header name is followed straight by its colon"));
+        }
+        if !name.bytes().all(is_token) {
+            return Err(bad("a header name holds only token characters"));
+        }
+    }
+    Ok(())
+}
+
+fn is_token(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
 fn framing(head: &str) -> Result<Framing, Refusal> {
@@ -394,6 +456,98 @@ mod tests {
         assert!(Slot::take(&open, 3).is_none());
         drop(held);
         assert!(Slot::take(&open, 3).is_some());
+    }
+
+    #[test]
+    fn a_well_formed_head_passes_every_check() {
+        assert_eq!(
+            checked("GET /api/incidents?a=b HTTP/1.1\r\nHost: x\r\nAccept: */*\r\n"),
+            Ok(())
+        );
+        assert_eq!(checked("POST / HTTP/1.1\r\n"), Ok(()));
+    }
+
+    #[test]
+    fn a_head_that_does_not_end_its_lines_crlf_is_refused() {
+        for head in [
+            "GET / HTTP/1.1\n",
+            "GET / HTTP/1.1\r\nHost: x\n",
+            "GET / HTTP/1.1\r\nHost: x",
+        ] {
+            assert_eq!(
+                checked(head).map_err(|refusal| refusal.code),
+                Err("bad_head"),
+                "{head:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn whitespace_before_a_colon_is_refused_because_proxies_disagree_about_it() {
+        for head in [
+            "GET / HTTP/1.1\r\nContent-Length : 5\r\n",
+            "GET / HTTP/1.1\r\nContent-Length\t: 5\r\n",
+        ] {
+            assert_eq!(
+                checked(head).map_err(|refusal| refusal.code),
+                Err("bad_head"),
+                "{head:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folded_header_line_is_refused() {
+        let head = "GET / HTTP/1.1\r\nHost: x\r\n  still-host\r\n";
+        assert_eq!(
+            checked(head).map_err(|refusal| refusal.code),
+            Err("bad_head")
+        );
+    }
+
+    #[test]
+    fn a_header_name_outside_the_token_set_is_refused() {
+        for head in [
+            "GET / HTTP/1.1\r\nCon tent: 5\r\n",
+            "GET / HTTP/1.1\r\n\u{a0}Host: x\r\n",
+            "GET / HTTP/1.1\r\n: 5\r\n",
+            "GET / HTTP/1.1\r\nHost\r\n",
+        ] {
+            assert_eq!(
+                checked(head).map_err(|refusal| refusal.code),
+                Err("bad_head"),
+                "{head:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_line_that_is_not_three_parts_is_refused() {
+        for head in [
+            "GET /a b HTTP/1.1\r\n",
+            "GET /only\r\n",
+            "GET  /double HTTP/1.1\r\n",
+            "GET / HTTP/1.1 extra\r\n",
+            "GET / SPDY/3\r\n",
+        ] {
+            assert_eq!(
+                checked(head).map_err(|refusal| refusal.code),
+                Err("bad_head"),
+                "{head:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn more_header_lines_than_allowed_are_refused() {
+        let many: String = (0..MOST_HEADERS + 1)
+            .map(|index| format!("X-{index}: v\r\n"))
+            .collect();
+        let head = format!("GET / HTTP/1.1\r\n{many}");
+        assert_eq!(
+            checked(&head).map_err(|refusal| refusal.code),
+            Err("bad_head")
+        );
     }
 
     #[test]

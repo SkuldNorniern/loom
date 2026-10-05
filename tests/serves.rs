@@ -272,3 +272,29 @@ fn a_chunked_body_past_the_route_limit_is_refused() {
     );
     assert!(said.starts_with("HTTP/1.1 413 "), "{said}");
 }
+
+#[test]
+fn a_head_request_carries_no_body_over_the_socket() {
+    let at = listening(Server::new(routed));
+    let said = ask(&at, "HEAD /hello HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(said.starts_with("HTTP/1.1 200 OK\r\n"), "{said}");
+    assert!(said.contains("Content-Length: 11\r\n"), "{said}");
+    assert!(said.ends_with("\r\n\r\n"), "{said}");
+}
+
+#[test]
+fn a_head_the_proxies_would_read_differently_is_refused() {
+    let at = listening(Server::new(routed));
+    for raw in [
+        "GET /hello HTTP/1.1\r\nContent-Length : 5\r\nConnection: close\r\n\r\n",
+        "GET /hello HTTP/1.1\r\nHost: x\r\n  folded\r\nConnection: close\r\n\r\n",
+        "GET /a b HTTP/1.1\r\nConnection: close\r\n\r\n",
+    ] {
+        let said = ask(&at, raw);
+        assert!(
+            said.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "{raw:?} gave {said}"
+        );
+        assert!(said.contains("bad_head"), "{said}");
+    }
+}

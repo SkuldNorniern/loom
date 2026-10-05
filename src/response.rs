@@ -119,8 +119,19 @@ impl Response {
     }
 
     pub fn write_with(&self, out: &mut impl Write, keep: bool) -> std::io::Result<()> {
+        self.write_body(out, keep, true)
+    }
+
+    pub fn write_body(
+        &self,
+        out: &mut impl Write,
+        keep: bool,
+        with_body: bool,
+    ) -> std::io::Result<()> {
         out.write_all(self.head_with(keep).as_bytes())?;
-        out.write_all(&self.body)?;
+        if with_body {
+            out.write_all(&self.body)?;
+        }
         out.flush()
     }
 }
@@ -177,6 +188,17 @@ mod tests {
         assert_eq!(held.header("set-cookie"), Some("session=abc; HttpOnly"));
         assert_eq!(held.header("Set-Cookie"), Some("session=abc; HttpOnly"));
         assert_eq!(held.header("content-type"), None);
+    }
+
+    #[test]
+    fn a_head_request_is_answered_with_its_length_but_no_body() {
+        let held = Response::text("hello");
+        let mut out = Vec::new();
+        held.write_body(&mut out, false, false).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("Content-Length: 5\r\n"), "{said}");
+        assert!(said.ends_with("\r\n\r\n"), "{said}");
+        assert!(!said.contains("hello"), "{said}");
     }
 
     #[test]
