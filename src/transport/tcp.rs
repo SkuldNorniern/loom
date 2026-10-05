@@ -54,6 +54,7 @@ pub fn listen(
         let talk = Arc::clone(&talk);
         thread::spawn(move || {
             let _slot = slot;
+            let _ = stream.set_nodelay(true);
             let _ = stream.set_write_timeout(Some(opening.timeout));
             let _ = stream.set_read_timeout(Some(opening.timeout));
             let from = stream
