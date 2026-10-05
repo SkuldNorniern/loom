@@ -14,8 +14,11 @@ Came out of the admin API of a DLP console, which it still serves.
 - `Method`: the seven it knows, `Other(String)` for the rest, kept as written.
 - `Response`: status, content type, body, extra headers. A header value holding control characters
   is dropped, so it cannot split the response.
-- `Server`: bounded connections, read and write timeouts, header and body limits, per-route body
-  limit, refusal callback.
+- `Server`: composes the two layers below. Bounded connections, read, write and idle timeouts,
+  header and body limits, per-route body limit, refusal callback.
+- `protocol::http1`: reads a request and writes an answer over any `BufRead` and `Write`. Knows
+  nothing of sockets.
+- `transport::tcp`: accepts connections, holds the slots, sets the timeouts. Knows nothing of HTTP.
 - `Router`: method and path matching, `:name` captures, trailing `*rest`. 405 names what the route
   takes, 404 otherwise.
 - `Ui`: writes HTML straight out, with no retained tree. Flat `open`/`close`, or a `scope` guard
