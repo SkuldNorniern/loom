@@ -124,6 +124,46 @@ bytes */<length>`. A range loom cannot answer, such as several at once or a unit
 gets the whole file. So does an `If-Range` that no longer matches the file's tag, because a piece of
 a file the client stopped holding would corrupt what it is building.
 
+## Live updates
+
+A browser's `EventSource` wants one long answer it reads forever. `events::open` hands back a feed
+and the answer to return:
+
+```rust
+let (feed, answer) = loom::events::open();
+watchers.lock().unwrap().push(feed);
+answer
+```
+
+Sending from anywhere, as often as there is something to say:
+
+```rust
+feed.send(&Event::of("at").data(state.to_string()));
+feed.note("still here");
+```
+
+`send` answers false once that client is gone, so a tick that keeps a list of them prunes it as it
+goes: `watching.retain(|feed| feed.send(&held))`. A newline inside `data` becomes another `data:`
+line, so JSON with newlines in it cannot end the event early. The answer carries no length and goes
+out chunked, one write per event, and `TCP_NODELAY` means the event leaves as it is written.
+
+`examples/live.rs` is a board a server thread moves 12 times a second, a browser drawing it from
+`EventSource`, and buttons that `POST` back. A watcher holds a connection slot for as long as it
+watches, so raise `connections` and set `timeout: None` when that is the shape of the thing.
+
+## Cookies
+
+```rust
+Response::json(body).with_cookie(Cookie::new("session", key).for_seconds(28800))
+Response::json(body).with_cookie(Cookie::cleared("session"))
+```
+
+`HttpOnly`, `SameSite=Strict` and `Path=/` are on without being asked for, because the cookie that
+needs them is the one nobody remembers to set them on. `readable_by_script`, `same_site` and
+`only_over_tls` give them up deliberately. `SameSite::None` writes `Secure` on its own, since a
+browser drops it otherwise. A space, a semicolon or a quote in a name or value is dropped, so a
+value cannot carry another attribute in.
+
 ## Limits
 
 ```text
