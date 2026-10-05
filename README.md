@@ -18,9 +18,9 @@ Came out of the admin API of a DLP console, which it still serves.
   limit, refusal callback.
 - `Router`: method and path matching, `:name` captures, trailing `*rest`. 405 names what the route
   takes, 404 otherwise.
-- `Ui`: writes HTML straight out, with no retained tree. Text and attribute values are escaped
-  without being asked; `raw` is the one way past that. A tag closes when its guard leaves scope,
-  or with `begin` and `close` when the nesting is not lexical.
+- `Ui`: writes HTML straight out, with no retained tree. Flat `open`/`close`, or a `scope` guard
+  where a Rust scope fits. Selectors carry id and classes. Everything is escaped unless you call
+  `raw`.
 - `json`: writer for response bodies. Escapes `<` and control characters.
 - `percent`: decode and encode, `pairs` for query and form bodies.
 - `status`: reason phrases.
@@ -50,33 +50,48 @@ anything is decoded, so `%2F` stays inside its segment and cannot change which r
 Captures arrive percent-decoded. An exact segment wins over a capture at the same depth. `*rest`
 must be last and must match at least one segment.
 
-Answering with HTML. No closures: a tag closes when its guard goes out of scope.
+Answering with HTML. No closures. It is written flat, in the order the markup comes out, and
+indentation shows the nesting:
 
 ```rust
-let mut page = Ui::page("loom");
-{
-    let mut main = page.open("main");
-    main.h1("loom");
-    main.p("escaped unless you ask otherwise");
-    let mut list = main.open("ul");
-    list.said("li", "<kept as text>");
-}
+let mut page = Ui::page("명부");
+page.open("main");
+page.h1("명부");
+  page.open("table.roster");
+    page.open("tr");
+      page.th("이름");
+      page.th("학번");
+    page.close();
+    page.open("tr");
+      page.td("홍길동");
+      page.td("2023****");
+    page.close();
+  page.close();
 Response::ui(page)
 ```
 
-Where the nesting is not a Rust scope, `begin` and `close` pair up instead:
+`finish` closes whatever is still open, so the trailing `close` calls are optional and an early
+return cannot emit an unbalanced document. Closing more than was opened writes nothing extra.
+
+A selector carries the id and classes, so most elements need no attribute list:
 
 ```rust
-ui.begin_with("table", &[("class", "roster")]);
-ui.begin("tr");
-ui.said("td", "홍길동");
-ui.close();
-ui.close();
+page.open("ul.roster");
+page.el("div#top.card.wide", "text");
+page.void("input#q.field", &[("type", "text")]);
+page.el_with("a.link", &[("href", "/x?a=1&b=2")], "go");
 ```
 
-`finish` closes anything still open, so an early return cannot emit an unbalanced document, and
-closing more than was opened writes nothing extra. A `HEAD` request is answered by the route that
-answers `GET`, and the server sends that answer without its body.
+Text and attribute values are escaped, including anything coming from a selector, so a class cannot
+break out of its quotes. `raw` is the one way past escaping. A selector that is not a tag, or that
+carries a part which is not a name, writes nothing at all rather than something malformed.
+
+Where a Rust scope does match the nesting, `scope` returns a guard that closes its tag when it ends:
+
+```rust
+let mut main = page.scope("main");
+main.h1("Hello");
+```
 
 ```
 cargo run --example hello
