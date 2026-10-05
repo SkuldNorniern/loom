@@ -17,6 +17,7 @@ pub struct Limits {
     pub idle: Option<Duration>,
     pub per_connection: usize,
     pub drain: Option<Duration>,
+    pub arrival: Option<Duration>,
 }
 
 impl Default for Limits {
@@ -29,6 +30,7 @@ impl Default for Limits {
             idle: Some(Duration::from_secs(5)),
             per_connection: 100,
             drain: Some(Duration::from_secs(10)),
+            arrival: Some(Duration::from_secs(30)),
         }
     }
 }
@@ -117,6 +119,7 @@ impl Server {
                         header: limits.header,
                         body: limits.body,
                         body_limit: body_limit.as_deref(),
+                        arrival: limits.arrival,
                     };
                     let (reader, writer) = link.both();
                     let Some(answer) = http1::answer(
@@ -155,6 +158,7 @@ mod tests {
         assert_eq!(limits.idle, Some(Duration::from_secs(5)));
         assert_eq!(limits.per_connection, 100);
         assert_eq!(limits.drain, Some(Duration::from_secs(10)));
+        assert_eq!(limits.arrival, Some(Duration::from_secs(30)));
     }
 
     #[test]
@@ -167,6 +171,7 @@ mod tests {
             idle: None,
             per_connection: 0,
             drain: None,
+            arrival: None,
         };
         assert_eq!(
             limits.body,
@@ -179,5 +184,9 @@ mod tests {
             "zero keeps serving until client closes"
         );
         assert!(limits.drain.is_none(), "none drains as long as it takes");
+        assert!(
+            limits.arrival.is_none(),
+            "none lets a request take its time"
+        );
     }
 }

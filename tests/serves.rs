@@ -478,6 +478,99 @@ fn a_body_of_known_length_is_not_chunked_and_the_connection_survives_it() {
 }
 
 #[test]
+fn trailers_without_end_are_refused_instead_of_read_forever() {
+    let at = listening(Server::new(routed));
+    let stream = TcpStream::connect(&at).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+    writer
+        .write_all(
+            b"POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n",
+        )
+        .unwrap();
+    writer.flush().unwrap();
+
+    let since = Instant::now();
+    let mut sent = 0u64;
+    while since.elapsed() < Duration::from_secs(2) {
+        if writer.write_all(b"X: y\r\n").is_err() {
+            break;
+        }
+        sent += 6;
+        if sent > 1024 * 1024 {
+            break;
+        }
+    }
+    let said = one_answer(&mut reader);
+    assert!(said.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{said}");
+    assert!(
+        sent < 1024 * 1024,
+        "the server stopped reading trailers instead of taking {sent} bytes of them"
+    );
+}
+
+#[test]
+fn a_request_that_trickles_in_is_refused_when_its_time_runs_out() {
+    let at = listening(Server::new(routed).limits(Limits {
+        arrival: Some(Duration::from_millis(300)),
+        ..Limits::default()
+    }));
+    let stream = TcpStream::connect(&at).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let since = Instant::now();
+    for byte in b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n" {
+        if writer.write_all(&[*byte]).is_err() {
+            break;
+        }
+        let _ = writer.flush();
+        thread::sleep(Duration::from_millis(40));
+    }
+    let said = one_answer(&mut reader);
+    assert!(
+        said.starts_with("HTTP/1.1 408 Request Timeout\r\n"),
+        "{said}"
+    );
+    assert!(
+        since.elapsed() < Duration::from_secs(3),
+        "a trickle is cut off, not waited out"
+    );
+}
+
+#[test]
+fn a_connection_kept_open_and_then_left_alone_is_closed_without_an_answer() {
+    let at = listening(Server::new(routed).limits(Limits {
+        idle: Some(Duration::from_millis(200)),
+        ..Limits::default()
+    }));
+    let stream = TcpStream::connect(&at).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+    writer
+        .write_all(b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    writer.flush().unwrap();
+    assert!(one_answer(&mut reader).ends_with("hello world"));
+
+    let mut rest = String::new();
+    reader.read_to_string(&mut rest).unwrap();
+    assert!(
+        rest.is_empty(),
+        "an idle connection is closed, not answered an error: {rest}"
+    );
+}
+
+#[test]
 fn a_chunked_body_arrives_whole() {
     let at = listening(Server::new(routed));
     let said = ask(

@@ -1,10 +1,13 @@
 use std::io::{BufRead, Read, Write};
+use std::time::{Duration, Instant};
 
 use crate::method::Method;
 use crate::request::Request;
 use crate::response::Response;
 
 const MOST_HEADERS: usize = 100;
+const MOST_TRAILERS: usize = 16;
+const BLOCK: usize = 16 * 1024;
 
 pub type Measure = dyn Fn(&str, &str) -> usize + Send + Sync;
 pub type Answering = dyn Fn(&Request) -> Response + Send + Sync;
@@ -15,6 +18,38 @@ pub struct Reading<'a> {
     pub header: usize,
     pub body: usize,
     pub body_limit: Option<&'a Measure>,
+    pub arrival: Option<Duration>,
+}
+
+#[derive(Clone, Copy)]
+struct Clock {
+    since: Instant,
+    arrival: Option<Duration>,
+}
+
+impl Clock {
+    fn started(arrival: Option<Duration>) -> Self {
+        Self {
+            since: Instant::now(),
+            arrival,
+        }
+    }
+
+    fn ran_out(&self) -> bool {
+        self.arrival
+            .is_some_and(|arrival| self.since.elapsed() >= arrival)
+    }
+
+    fn still_waiting(&self) -> Result<(), Refusal> {
+        if self.ran_out() {
+            return Err(Refusal::new(
+                408,
+                "too_slow",
+                "request did not arrive in time",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +98,8 @@ pub fn read(
     from: &str,
     held: Reading<'_>,
 ) -> Result<Option<Request>, Refusal> {
-    let head = read_head(reader, held.header)?;
+    let clock = Clock::started(held.arrival);
+    let head = read_head(reader, held.header, clock)?;
     let Some(head) = head else { return Ok(None) };
     checked(&head).map_err(|refusal| refusal.about(&head))?;
     let framed = framing(&head).map_err(|refusal| refusal.about(&head))?;
@@ -75,7 +111,7 @@ pub fn read(
             if asked_to_continue {
                 go_ahead(interim);
             }
-            read_chunked(reader, limit).map_err(|refusal| refusal.about(&head))?
+            read_chunked(reader, limit, clock).map_err(|refusal| refusal.about(&head))?
         }
         Framing::Length(length) => {
             if length > limit {
@@ -93,11 +129,7 @@ pub fn read(
             if asked_to_continue {
                 go_ahead(interim);
             }
-            let mut body = vec![0; length];
-            if length > 0 && reader.read_exact(&mut body).is_err() {
-                return Err(Refusal::new(400, "bad_request", "body ended early").about(&head));
-            }
-            body
+            read_counted(reader, length, clock).map_err(|refusal| refusal.about(&head))?
         }
     };
     Ok(Request::parse_from(&head, body, from.to_owned()))
@@ -123,7 +155,11 @@ fn go_ahead(out: &mut impl Write) {
     let _ = out.flush();
 }
 
-fn read_head(reader: &mut impl BufRead, most: usize) -> Result<Option<String>, Refusal> {
+fn read_head(
+    reader: &mut impl BufRead,
+    most: usize,
+    clock: Clock,
+) -> Result<Option<String>, Refusal> {
     let mut head = String::new();
     loop {
         let mut line = String::new();
@@ -131,6 +167,7 @@ fn read_head(reader: &mut impl BufRead, most: usize) -> Result<Option<String>, R
         match reader.take(left).read_line(&mut line) {
             Ok(0) => return Ok(None),
             Ok(_) => {}
+            Err(error) if head.is_empty() && gave_up(&error) => return Ok(None),
             Err(_) => {
                 return Err(Refusal::new(
                     400,
@@ -139,6 +176,9 @@ fn read_head(reader: &mut impl BufRead, most: usize) -> Result<Option<String>, R
                 ));
             }
         }
+        clock
+            .still_waiting()
+            .map_err(|refusal| refusal.about(&head))?;
         if !line.ends_with('\n') {
             return if head.len() + line.len() > most {
                 Err(Refusal::new(
@@ -266,10 +306,37 @@ fn framing(head: &str) -> Result<Framing, Refusal> {
     Ok(Framing::Length(length.unwrap_or(0)))
 }
 
-fn read_chunked(reader: &mut impl BufRead, most: usize) -> Result<Vec<u8>, Refusal> {
+fn gave_up(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+fn read_counted(
+    reader: &mut impl BufRead,
+    length: usize,
+    clock: Clock,
+) -> Result<Vec<u8>, Refusal> {
+    let mut body = Vec::with_capacity(length.min(BLOCK));
+    let mut block = vec![0u8; BLOCK.min(length.max(1))];
+    while body.len() < length {
+        clock.still_waiting()?;
+        let want = (length - body.len()).min(block.len());
+        match reader.read(&mut block[..want]) {
+            Ok(0) => return Err(Refusal::new(400, "bad_request", "body ended early")),
+            Ok(read) => body.extend_from_slice(&block[..read]),
+            Err(_) => return Err(Refusal::new(400, "bad_request", "body could not be read")),
+        }
+    }
+    Ok(body)
+}
+
+fn read_chunked(reader: &mut impl BufRead, most: usize, clock: Clock) -> Result<Vec<u8>, Refusal> {
     let bad = || Refusal::new(400, "bad_framing", "a chunk could not be read");
     let mut body = Vec::new();
     loop {
+        clock.still_waiting()?;
         let mut line = String::new();
         (&mut *reader)
             .take(32)
@@ -291,26 +358,29 @@ fn read_chunked(reader: &mut impl BufRead, most: usize) -> Result<Vec<u8>, Refus
                 format!("a chunked body may be {} MiB", most / (1024 * 1024)),
             ));
         }
-        let mut chunk = vec![0; size];
-        reader.read_exact(&mut chunk).map_err(|_| bad())?;
-        body.extend_from_slice(&chunk);
+        body.extend_from_slice(&read_counted(reader, size, clock)?);
         let mut end = [0u8; 2];
         reader.read_exact(&mut end).map_err(|_| bad())?;
         if &end != b"\r\n" {
             return Err(bad());
         }
     }
-    loop {
+    for _ in 0..MOST_TRAILERS {
+        clock.still_waiting()?;
         let mut line = String::new();
         let read = (&mut *reader)
             .take(1024)
             .read_line(&mut line)
             .map_err(|_| bad())?;
         if read == 0 || line == "\r\n" || line == "\n" {
-            break;
+            return Ok(body);
         }
     }
-    Ok(body)
+    Err(Refusal::new(
+        400,
+        "bad_framing",
+        format!("a chunked body carries at most {MOST_TRAILERS} trailers"),
+    ))
 }
 
 pub struct Answer {
@@ -516,20 +586,23 @@ mod tests {
     #[test]
     fn a_chunked_body_reads_as_the_bytes_it_carried() {
         let raw = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
-        let body = read_chunked(&mut &raw[..], 1 << 20).unwrap();
+        let body = read_chunked(&mut &raw[..], 1 << 20, Clock::started(None)).unwrap();
         assert_eq!(body, b"hello world");
     }
 
     #[test]
     fn a_chunk_size_may_carry_an_extension_and_trailers_are_skipped() {
         let raw = b"5;name=x\r\nhello\r\n0\r\nX-Sum: 1\r\n\r\n";
-        assert_eq!(read_chunked(&mut &raw[..], 1 << 20).unwrap(), b"hello");
+        assert_eq!(
+            read_chunked(&mut &raw[..], 1 << 20, Clock::started(None)).unwrap(),
+            b"hello"
+        );
     }
 
     #[test]
     fn a_chunked_body_past_its_limit_is_refused() {
         let raw = b"10\r\n0123456789abcdef\r\n0\r\n\r\n";
-        let refusal = read_chunked(&mut &raw[..], 8).unwrap_err();
+        let refusal = read_chunked(&mut &raw[..], 8, Clock::started(None)).unwrap_err();
         assert_eq!(refusal.status, 413);
     }
 
@@ -540,14 +613,17 @@ mod tests {
             &b"zz\r\nhello\r\n"[..],
             &b"5\r\nhelloXX0\r\n\r\n"[..],
         ] {
-            assert!(read_chunked(&mut &raw[..], 1 << 20).is_err(), "{raw:?}");
+            assert!(
+                read_chunked(&mut &raw[..], 1 << 20, Clock::started(None)).is_err(),
+                "{raw:?}"
+            );
         }
     }
 
     #[test]
     fn head_longer_than_limit_is_refused_with_its_request_line() {
         let long = format!("GET /x HTTP/1.1\r\nX: {}\r\n\r\n", "a".repeat(4096));
-        let refusal = read_head(&mut long.as_bytes(), 256).unwrap_err();
+        let refusal = read_head(&mut long.as_bytes(), 256, Clock::started(None)).unwrap_err();
         assert_eq!(refusal.status, 413);
         assert_eq!(refusal.code, "headers_too_large");
         assert_eq!(refusal.method, "GET");
@@ -557,7 +633,9 @@ mod tests {
     #[test]
     fn head_ends_at_blank_line_and_body_is_left_for_reader() {
         let mut held = "POST /a HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi".as_bytes();
-        let head = read_head(&mut held, 1024).unwrap().unwrap();
+        let head = read_head(&mut held, 1024, Clock::started(None))
+            .unwrap()
+            .unwrap();
         assert_eq!(head, "POST /a HTTP/1.1\r\nContent-Length: 2\r\n");
         assert_eq!(framing(&head), Ok(Framing::Length(2)));
         let mut body = Vec::new();
@@ -567,6 +645,9 @@ mod tests {
 
     #[test]
     fn closed_connection_reads_as_no_request() {
-        assert_eq!(read_head(&mut "".as_bytes(), 1024), Ok(None));
+        assert_eq!(
+            read_head(&mut "".as_bytes(), 1024, Clock::started(None)),
+            Ok(None)
+        );
     }
 }
