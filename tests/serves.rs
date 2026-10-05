@@ -57,6 +57,18 @@ fn routed(request: &Request) -> Response {
         )),
         ["upload"] => Response::text(format!("{} bytes", request.body.len())),
         ["boom"] => panic!("a handler fell over"),
+        ["events"] => {
+            let (feed, answer) = loom::events::open();
+            thread::spawn(move || {
+                for which in 0..3 {
+                    thread::sleep(Duration::from_millis(60));
+                    if !feed.send(&loom::events::Event::of("tick").data(which.to_string())) {
+                        return;
+                    }
+                }
+            });
+            answer
+        }
         ["part"] => Response::part(
             "application/octet-stream",
             std::io::Cursor::new(b"0123456789".to_vec()),
@@ -567,6 +579,58 @@ fn a_connection_kept_open_and_then_left_alone_is_closed_without_an_answer() {
     assert!(
         rest.is_empty(),
         "an idle connection is closed, not answered an error: {rest}"
+    );
+}
+
+#[test]
+fn an_event_reaches_the_client_when_it_is_sent_and_not_at_the_end() {
+    let at = listening(Server::new(routed));
+    let stream = TcpStream::connect(&at).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+    writer
+        .write_all(b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    writer.flush().unwrap();
+
+    let since = Instant::now();
+    let mut head = String::new();
+    while !head.ends_with("\r\n\r\n") {
+        let mut byte = [0u8; 1];
+        reader.read_exact(&mut byte).unwrap();
+        head.push(byte[0] as char);
+    }
+    assert!(
+        head.contains("Content-Type: text/event-stream; charset=utf-8\r\n"),
+        "{head}"
+    );
+    assert!(head.contains("Transfer-Encoding: chunked\r\n"), "{head}");
+
+    let mut seen = Vec::new();
+    while seen.len() < 3 {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        if let Some(which) = line.trim().strip_prefix("data: ") {
+            seen.push((which.to_owned(), since.elapsed()));
+        }
+    }
+    assert_eq!(
+        seen.iter()
+            .map(|(which, _)| which.as_str())
+            .collect::<Vec<_>>(),
+        ["0", "1", "2"]
+    );
+    assert!(
+        seen[0].1 < Duration::from_millis(150),
+        "the first event arrived at {:?}, so nothing waited for the rest",
+        seen[0].1
+    );
+    assert!(
+        seen[2].1 > seen[0].1,
+        "events arrive as they are sent, not in one block"
     );
 }
 

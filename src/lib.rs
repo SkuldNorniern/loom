@@ -1,6 +1,7 @@
 pub mod assets;
 pub mod body;
 pub mod cookie;
+pub mod events;
 pub mod header;
 pub mod html;
 pub mod json;
