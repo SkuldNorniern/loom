@@ -18,6 +18,8 @@ Came out of the admin API of a DLP console, which it still serves.
   limit, refusal callback.
 - `Router`: method and path matching, `:name` captures, trailing `*rest`. 405 names what the route
   takes, 404 otherwise.
+- `Ui`: writes HTML straight out, with no retained tree. Text and attribute values are escaped
+  without being asked; `raw` is the one way past that. `Response::page` wraps a body in a document.
 - `json`: writer for response bodies. Escapes `<` and control characters.
 - `percent`: decode and encode, `pairs` for query and form bodies.
 - `status`: reason phrases.
@@ -42,9 +44,21 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
-A handler takes `(&Request, &Params)` and returns a `Response`. Captures arrive percent-decoded. An
-exact segment wins over a capture at the same depth. `*rest` must be last and must match at least
-one segment.
+A handler takes `(&Request, &Params)` and returns a `Response`. The target is split on `/` before
+anything is decoded, so `%2F` stays inside its segment and cannot change which route matches.
+Captures arrive percent-decoded. An exact segment wins over a capture at the same depth. `*rest`
+must be last and must match at least one segment.
+
+Answering with HTML:
+
+```rust
+Response::page("loom", |ui| {
+    ui.main(|ui| {
+        ui.h1("loom");
+        ui.p("escaped unless you ask otherwise");
+    })
+})
+```
 
 ```
 cargo run --example hello
