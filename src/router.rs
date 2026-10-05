@@ -92,12 +92,16 @@ impl Router {
 
     pub fn answer(&self, request: &Request) -> Response {
         let segments = request.segments();
+        let wanted = match request.method {
+            Method::Head => Method::Get,
+            ref held => held.clone(),
+        };
         let mut allowed: Vec<&str> = Vec::new();
         for route in &self.routes {
             let Some(params) = captured(&route.pattern, &segments) else {
                 continue;
             };
-            if route.method == request.method {
+            if route.method == wanted {
                 return (route.answer)(request, &params);
             }
             if !allowed.contains(&route.method.as_str()) {
@@ -221,6 +225,23 @@ mod tests {
                 .status,
             405
         );
+    }
+
+    #[test]
+    fn head_is_answered_by_the_route_that_answers_get() {
+        let answered = router().answer(&asked("HEAD", "/api/agents/pc-1"));
+        assert_eq!(answered.status, 200);
+        assert_eq!(
+            body(answered),
+            "agent pc-1",
+            "the server drops the body, not the router"
+        );
+    }
+
+    #[test]
+    fn head_on_a_route_that_only_takes_post_is_still_405() {
+        let answered = router().answer(&asked("HEAD", "/api/agents/pc-1/policy"));
+        assert_eq!(answered.status, 405);
     }
 
     #[test]
