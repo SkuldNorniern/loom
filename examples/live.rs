@@ -3,8 +3,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use std::path::{Path, PathBuf};
+
 use loom::events::{Event, Feed};
-use loom::json::Json;
 use loom::{Request, Response, Server, Ui};
 
 struct Board {
@@ -17,14 +18,12 @@ impl Board {
     fn step(&mut self) {
         let (x, y) = (self.at.0 + self.towards.0, self.at.1 + self.towards.1);
         self.at = (x.rem_euclid(40), y.rem_euclid(24));
-        let held = Event::of("at").data(
-            Json::object([
-                ("x", Json::number(f64::from(self.at.0))),
-                ("y", Json::number(f64::from(self.at.1))),
-                ("watching", Json::count(self.watching.len())),
-            ])
-            .to_string(),
-        );
+        let held = Event::of("at").data(format!(
+            "{},{},{}",
+            self.at.0,
+            self.at.1,
+            self.watching.len()
+        ));
         self.watching.retain(|feed| feed.send(&held));
     }
 }
@@ -53,19 +52,15 @@ fn page() -> Ui {
          button{font-size:1.5rem;padding:.25rem 1rem}",
     );
     page.close();
-    page.open("script");
-    page.raw(
-        "const dot=document.getElementById('dot'),count=document.getElementById('count');\
-         new EventSource('/events').addEventListener('at',held=>{\
-           const at=JSON.parse(held.data);\
-           dot.style.left=at.x+'rem';dot.style.top=at.y+'rem';\
-           count.textContent=at.watching+' watching';\
-         });\
-         for(const button of document.querySelectorAll('.turn'))\
-           button.onclick=()=>fetch('/turn?towards='+button.dataset.towards,{method:'POST'});",
-    );
+    page.open_with("script", &[("type", "module")]);
+    page.raw("import init from './live_client.js'; init();");
     page.close();
     page
+}
+
+fn client() -> Option<PathBuf> {
+    let held = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/live-client/dist");
+    held.join("live_client.js").is_file().then_some(held)
 }
 
 fn main() -> std::io::Result<()> {
@@ -89,8 +84,14 @@ fn main() -> std::io::Result<()> {
         }
     });
 
+    let Some(client) = client() else {
+        println!("run examples/live-client/build.sh first: the page is Rust, compiled to wasm");
+        return Ok(());
+    };
+
     Server::new(move |request: &Request| match request.path.as_str() {
         "/" => Response::ui(page()),
+        path if path.starts_with("/live_client") => loom::assets::under(request, &client, path),
         "/events" => {
             let (feed, answer) = loom::events::open();
             board

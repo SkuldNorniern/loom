@@ -151,6 +151,18 @@ out chunked, one write per event, and `TCP_NODELAY` means the event leaves as it
 `EventSource`, and buttons that `POST` back. A watcher holds a connection slot for as long as it
 watches, so raise `connections` and set `timeout: None` when that is the shape of the thing.
 
+The client is Rust, compiled to wasm:
+
+```
+examples/live-client/build.sh
+cargo run --example live -- 127.0.0.1:8099
+```
+
+`EventSource`, the parse, the two style properties and the `POST` all live in
+`examples/live-client/src/lib.rs`. The page carries one line of JavaScript,
+`import init from './live_client.js'; init();`, because a browser has no other way to start a wasm
+module and wasm reaches the DOM only through an import object. Everything above that line is Rust.
+
 ## Cookies
 
 ```rust
