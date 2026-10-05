@@ -21,6 +21,8 @@ Came out of the admin API of a DLP console, which it still serves.
 - `Ui`: writes HTML straight out, with no retained tree. Flat `open`/`close`, or a `scope` guard
   where a Rust scope fits. Selectors carry id and classes. Everything is escaped unless you call
   `raw`.
+- `assets`: serves a directory, with no way out of it. Content types by extension; an extension it
+  does not know is bytes, not a guess.
 - `json`: writer for response bodies. Escapes `<` and control characters.
 - `percent`: decode and encode, `pairs` for query and form bodies.
 - `status`: reason phrases.
@@ -85,6 +87,29 @@ page.el_with("a.link", &[("href", "/x?a=1&b=2")], "go");
 Text and attribute values are escaped, including anything coming from a selector, so a class cannot
 break out of its quotes. `raw` is the one way past escaping. A selector that is not a tag, or that
 carries a part which is not a name, writes nothing at all rather than something malformed.
+
+Forms, with the names doubling as the labels' `for` and the inputs' `id`:
+
+```rust
+page.form("post", "/api/agents");
+page.field("Device", "name", "text", "LAB-PC-07");
+page.choice("Removal", "removal", &[("open", "Open"), ("protected", "Protected")], "open");
+page.hidden("id", "pc-1");
+page.submit("Enrol");
+page.close();
+```
+
+A field whose name is not a name writes nothing, so a name cannot carry an event handler in.
+Anything but `get` is written as `post`, because that is all a browser form can send.
+
+Serving files:
+
+```rust
+loom::assets::under(request, Path::new("ui/dist"), &request.path)
+```
+
+A path leaving the root is 404, not an error: `..`, an encoded `..`, a leading `//`, and a directory
+all refuse. `within` answers the resolved path on its own if you need to decide something first.
 
 Where a Rust scope does match the nesting, `scope` returns a guard that closes its tag when it ends:
 
