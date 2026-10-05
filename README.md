@@ -1,7 +1,7 @@
 # loom
 
-HTTP/1.1 server for Rust. No dependencies. Limits are fixed and stated, and the caller sets the
-policy the server would otherwise guess.
+HTTP/1.1 server for Rust. No dependencies. Every limit is stated and waivable, and the caller sets
+the policy the server would otherwise guess.
 
 Came out of the admin API of a DLP console, which it still serves.
 
@@ -16,6 +16,8 @@ Came out of the admin API of a DLP console, which it still serves.
   is dropped, so it cannot split the response.
 - `Server`: composes the two layers below. Bounded connections, read, write and idle timeouts,
   header and body limits, per-route body limit, refusal callback.
+- `Stop`: a clonable handle. `stop.now()` stops accepting, lets the requests already running
+  finish, and `serve` returns.
 - `protocol::http1`: reads a request and writes an answer over any `BufRead` and `Write`. Knows
   nothing of sockets.
 - `transport::tcp`: accepts connections, holds the slots, sets the timeouts. Knows nothing of HTTP.
@@ -24,13 +26,15 @@ Came out of the admin API of a DLP console, which it still serves.
 - `Ui`: writes HTML straight out, with no retained tree. Flat `open`/`close`, or a `scope` guard
   where a Rust scope fits. Selectors carry id and classes. Everything is escaped unless you call
   `raw`.
-- `Body`: `Empty`, `Bytes`, `File` or `Read`. A length it knows becomes `Content-Length`; one it
-  does not becomes `Transfer-Encoding: chunked`. Nothing is buffered to find out.
+- `Body`: `Empty`, `Bytes`, `File`, `Read` or `Counted`. A length it knows becomes
+  `Content-Length`; one it does not becomes `Transfer-Encoding: chunked`. Nothing is buffered to
+  find out.
 - `assets`: serves a directory, with no way out of it, straight from the file. Content types by
-  extension; an extension it does not know is bytes, not a guess.
+  extension; an extension it does not know is bytes, not a guess. ETag and `304`, and byte ranges
+  as `206`.
 - `json`: writer for response bodies. Escapes `<` and control characters.
 - `percent`: decode and encode, `pairs` for query and form bodies.
-- `status`: reason phrases.
+- `status`: reason phrases. One it does not know is named by its class, never as another status.
 
 ## Use
 
@@ -125,7 +129,11 @@ main.h1("Hello");
 
 ```
 cargo run --example hello
+cargo run --example site -- 127.0.0.1:8099 ./public
 ```
+
+`site` is a whole static site in 45 lines: a directory with ETags, ranges and conditional
+requests, one route of its own, and enter to stop.
 
 ## Limits
 
@@ -164,6 +172,25 @@ The body limit is the one worth keeping. A body is read whole into memory before
 `usize::MAX` means one request can take the machine's memory with it. Raise it for the route that
 needs it; the rest of the server does not have to pay for that route.
 
+## Stopping
+
+```rust
+let stop = Stop::new();
+thread::spawn({
+    let stop = stop.clone();
+    move || {
+        wait_for_whatever_says_so();
+        stop.now();
+    }
+});
+Server::new(handler).stop_with(stop).serve(listener)?;
+```
+
+`now()` sets the flag and pokes the listener's own address, so an accept already blocked wakes and
+sees it. Nothing new is accepted, a connection in the middle of a request answers it and closes,
+and `serve` returns once the open connections are gone or `Limits { drain }` runs out. `drain` is
+`Some(10s)` by default and `None` waits for them however long they take.
+
 ## What a head must look like
 
 Every line ends CRLF. A request line is exactly method, target and version, the version starts
@@ -187,6 +214,13 @@ Response::file(Path::new("ui/dist/app.wasm"))?        // length from the filesys
 Response::reader("text/plain; charset=utf-8", from)   // unknown, so chunked
 ```
 
+A handler that panics is answered `500`, the connection closes, and the server carries on. What the
+panic said reaches the refusal callback and stderr, never the client.
+
+A client that sends `Expect: 100-continue` is answered `100 Continue` before its body is read, or
+`413` without reading it at all if the body is larger than the route takes. Without this a client
+waiting for `100` and a server waiting for a body deadlock until one of them times out.
+
 ## Caching
 
 An answer says `Cache-Control: no-store` unless it is asked for something else, so nothing leaks
@@ -200,8 +234,19 @@ page.without_cache_header()           // say nothing and let a proxy decide
 ```
 
 `assets::under` tags every file it serves with an `ETag` of its length and modification time, and
-answers `304` when the client sends that tag back in `If-None-Match`. A `304` and a `204` carry no
-`Content-Type`, no `Content-Length` and no body.
+answers `304` when the client sends that tag back in `If-None-Match`. A served file says `no-cache`,
+so a browser keeps its copy and asks about it instead of fetching it again. A `304` and a `204`
+carry no `Content-Type`, no `Content-Length` and no body.
+
+## Ranges
+
+A served file says `Accept-Ranges: bytes`. `Range: bytes=2-5`, `bytes=7-` and `bytes=-3` are
+answered `206` with `Content-Range` and only those bytes, read from that offset in the file and
+never the whole of it. A range past the end stops at the end; one that starts past it is `416` with
+`Content-Range: bytes */<length>`. A range loom cannot answer — several at once, a unit that is not
+bytes, nonsense — gets the whole file instead. `If-Range` that does not match the file's current tag
+also gets the whole file, because a part of a file the client no longer holds would corrupt what it
+is building.
 
 ## Keeping the connection
 
