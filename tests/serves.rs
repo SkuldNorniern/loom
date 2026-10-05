@@ -128,7 +128,7 @@ fn what_the_server_refused_is_told_to_the_caller() {
 
     let said = ask(
         &at,
-        "POST /hello HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "POST /hello HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n",
     );
     assert!(said.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{said}");
 
@@ -248,4 +248,27 @@ fn a_connection_is_closed_after_its_share_of_requests() {
         said.contains("Connection: close\r\n"),
         "the last request of a connection says so: {said}"
     );
+}
+
+#[test]
+fn a_chunked_body_arrives_whole() {
+    let at = listening(Server::new(routed));
+    let said = ask(
+        &at,
+        "POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+         5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+    );
+    assert!(said.starts_with("HTTP/1.1 200 OK\r\n"), "{said}");
+    assert!(said.ends_with("11 bytes"), "{said}");
+}
+
+#[test]
+fn a_chunked_body_past_the_route_limit_is_refused() {
+    let at = listening(Server::new(routed).body_limit(|_, _| 4));
+    let said = ask(
+        &at,
+        "POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+         5\r\nhello\r\n0\r\n\r\n",
+    );
+    assert!(said.starts_with("HTTP/1.1 413 "), "{said}");
 }

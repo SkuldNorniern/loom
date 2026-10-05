@@ -202,25 +202,31 @@ fn read(
 ) -> Result<Option<Request>, Refusal> {
     let head = read_head(reader, limits.header)?;
     let Some(head) = head else { return Ok(None) };
-    let length = body_length(&head).map_err(|refusal| refusal.about(&head))?;
+    let framed = framing(&head).map_err(|refusal| refusal.about(&head))?;
     let (method, path) = line_of(&head);
     let limit = body_limit.map_or(limits.body, |of| of(method, path));
-    if length > limit {
-        return Err(Refusal::new(
-            413,
-            "body_too_large",
-            format!(
-                "body is {:.1} MiB; this endpoint takes at most {} MiB",
-                length as f64 / (1024.0 * 1024.0),
-                limit / (1024 * 1024)
-            ),
-        )
-        .about(&head));
-    }
-    let mut body = vec![0; length];
-    if length > 0 && reader.read_exact(&mut body).is_err() {
-        return Err(Refusal::new(400, "bad_request", "body ended early").about(&head));
-    }
+    let body = match framed {
+        Framing::Chunked => read_chunked(reader, limit).map_err(|refusal| refusal.about(&head))?,
+        Framing::Length(length) => {
+            if length > limit {
+                return Err(Refusal::new(
+                    413,
+                    "body_too_large",
+                    format!(
+                        "body is {:.1} MiB; this endpoint takes at most {} MiB",
+                        length as f64 / (1024.0 * 1024.0),
+                        limit / (1024 * 1024)
+                    ),
+                )
+                .about(&head));
+            }
+            let mut body = vec![0; length];
+            if length > 0 && reader.read_exact(&mut body).is_err() {
+                return Err(Refusal::new(400, "bad_request", "body ended early").about(&head));
+            }
+            body
+        }
+    };
     Ok(Request::parse_from(&head, body, from.to_owned()))
 }
 
@@ -259,19 +265,30 @@ fn read_head(reader: &mut impl BufRead, most: usize) -> Result<Option<String>, R
     }
 }
 
-fn body_length(head: &str) -> Result<usize, Refusal> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Framing {
+    Length(usize),
+    Chunked,
+}
+
+fn framing(head: &str) -> Result<Framing, Refusal> {
     let mut length = None;
+    let mut chunked = false;
     for line in head.lines().skip(1) {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
         let value = value.trim();
         if name.eq_ignore_ascii_case("transfer-encoding") {
-            return Err(Refusal::new(
-                400,
-                "bad_framing",
-                "transfer-encoding is not read; send content-length",
-            ));
+            let last = value.rsplit(',').next().unwrap_or_default().trim();
+            if !last.eq_ignore_ascii_case("chunked") {
+                return Err(Refusal::new(
+                    400,
+                    "bad_framing",
+                    "the only transfer-encoding read is chunked",
+                ));
+            }
+            chunked = true;
         }
         if name.eq_ignore_ascii_case("content-length") {
             let parsed = value
@@ -287,7 +304,64 @@ fn body_length(head: &str) -> Result<usize, Refusal> {
             length = Some(parsed);
         }
     }
-    Ok(length.unwrap_or(0))
+    if chunked {
+        if length.is_some() {
+            return Err(Refusal::new(
+                400,
+                "bad_framing",
+                "a chunked body must not also give content-length",
+            ));
+        }
+        return Ok(Framing::Chunked);
+    }
+    Ok(Framing::Length(length.unwrap_or(0)))
+}
+
+fn read_chunked(reader: &mut impl BufRead, most: usize) -> Result<Vec<u8>, Refusal> {
+    let bad = || Refusal::new(400, "bad_framing", "a chunk could not be read");
+    let mut body = Vec::new();
+    loop {
+        let mut line = String::new();
+        (&mut *reader)
+            .take(32)
+            .read_line(&mut line)
+            .map_err(|_| bad())?;
+        let held = line.trim_end();
+        let held = held.split(';').next().unwrap_or_default().trim();
+        if held.is_empty() {
+            return Err(bad());
+        }
+        let size = usize::from_str_radix(held, 16).map_err(|_| bad())?;
+        if size == 0 {
+            break;
+        }
+        if body.len() + size > most {
+            return Err(Refusal::new(
+                413,
+                "body_too_large",
+                format!("a chunked body may be {} MiB", most / (1024 * 1024)),
+            ));
+        }
+        let mut chunk = vec![0; size];
+        reader.read_exact(&mut chunk).map_err(|_| bad())?;
+        body.extend_from_slice(&chunk);
+        let mut end = [0u8; 2];
+        reader.read_exact(&mut end).map_err(|_| bad())?;
+        if &end != b"\r\n" {
+            return Err(bad());
+        }
+    }
+    loop {
+        let mut line = String::new();
+        let read = (&mut *reader)
+            .take(1024)
+            .read_line(&mut line)
+            .map_err(|_| bad())?;
+        if read == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+    }
+    Ok(body)
 }
 
 #[cfg(test)]
@@ -324,26 +398,69 @@ mod tests {
 
     #[test]
     fn ambiguous_body_framing_is_refused() {
-        assert_eq!(body_length("POST / HTTP/1.1\r\nHost: x\r\n"), Ok(0));
         assert_eq!(
-            body_length("POST / HTTP/1.1\r\nContent-Length: 5\r\n"),
-            Ok(5)
+            framing("POST / HTTP/1.1\r\nHost: x\r\n"),
+            Ok(Framing::Length(0))
         );
         assert_eq!(
-            body_length("POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n"),
-            Ok(5)
+            framing("POST / HTTP/1.1\r\nContent-Length: 5\r\n"),
+            Ok(Framing::Length(5))
+        );
+        assert_eq!(
+            framing("POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n"),
+            Ok(Framing::Length(5))
+        );
+        assert_eq!(
+            framing("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n"),
+            Ok(Framing::Chunked)
+        );
+        assert_eq!(
+            framing("POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n"),
+            Ok(Framing::Chunked)
         );
         for head in [
             "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 7\r\n",
-            "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n",
             "POST / HTTP/1.1\r\nContent-Length: -3\r\n",
             "POST / HTTP/1.1\r\nContent-Length: 5x\r\n",
+            "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n",
+            "POST / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip\r\n",
         ] {
             assert_eq!(
-                body_length(head).map_err(|refusal| refusal.status),
+                framing(head).map_err(|refusal| refusal.status),
                 Err(400),
                 "{head}"
             );
+        }
+    }
+
+    #[test]
+    fn a_chunked_body_reads_as_the_bytes_it_carried() {
+        let raw = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let body = read_chunked(&mut &raw[..], 1 << 20).unwrap();
+        assert_eq!(body, b"hello world");
+    }
+
+    #[test]
+    fn a_chunk_size_may_carry_an_extension_and_trailers_are_skipped() {
+        let raw = b"5;name=x\r\nhello\r\n0\r\nX-Sum: 1\r\n\r\n";
+        assert_eq!(read_chunked(&mut &raw[..], 1 << 20).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn a_chunked_body_past_its_limit_is_refused() {
+        let raw = b"10\r\n0123456789abcdef\r\n0\r\n\r\n";
+        let refusal = read_chunked(&mut &raw[..], 8).unwrap_err();
+        assert_eq!(refusal.status, 413);
+    }
+
+    #[test]
+    fn a_chunk_that_lies_about_its_size_is_refused() {
+        for raw in [
+            &b"5\r\nhi\r\n0\r\n\r\n"[..],
+            &b"zz\r\nhello\r\n"[..],
+            &b"5\r\nhelloXX0\r\n\r\n"[..],
+        ] {
+            assert!(read_chunked(&mut &raw[..], 1 << 20).is_err(), "{raw:?}");
         }
     }
 
@@ -362,7 +479,7 @@ mod tests {
         let mut held = "POST /a HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi".as_bytes();
         let head = read_head(&mut held, 1024).unwrap().unwrap();
         assert_eq!(head, "POST /a HTTP/1.1\r\nContent-Length: 2\r\n");
-        assert_eq!(body_length(&head), Ok(2));
+        assert_eq!(framing(&head), Ok(Framing::Length(2)));
         let mut body = Vec::new();
         held.read_to_end(&mut body).unwrap();
         assert_eq!(body, b"hi");

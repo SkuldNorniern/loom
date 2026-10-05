@@ -62,8 +62,12 @@ wait for the next request   5s         Limits { idle, .. }
 requests per connection     100        Limits { per_connection, .. }
 ```
 
-A connection past the limit gets `503 busy` and is closed. `transfer-encoding` is refused, send
-`content-length`.
+A connection past the limit gets `503 busy` and is closed.
+
+A body is framed by `content-length` or by `transfer-encoding: chunked`. Chunk extensions are
+ignored and trailers are skipped. Giving both framings, or any transfer-encoding whose last coding
+is not `chunked`, is refused as `bad_framing`. A chunked body is held against the same per-route
+limit as any other.
 
 ## Keeping the connection
 
@@ -75,6 +79,6 @@ on a socket the server is about to drop. A connection slot is held for the whole
 
 ## Working on
 
-One thread per connection. No chunked transfer or streaming bodies yet; the body is a `Vec<u8>` and
-the `Body` split waits until something streams. No TLS, async, middleware or compression. See
+One thread per connection. No streaming bodies yet; the body is a `Vec<u8>` read whole, and the
+`Body` split waits until something streams. No TLS, async, middleware or compression. See
 `loom_plan.md`.
