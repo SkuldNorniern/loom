@@ -11,6 +11,7 @@ pub struct Response {
     pub content_type: String,
     pub body: Body,
     pub headers: Headers,
+    pub cache: String,
 }
 
 impl Response {
@@ -24,6 +25,7 @@ impl Response {
             content_type: content_type.into(),
             body,
             headers: Headers::new(),
+            cache: "no-store".to_owned(),
         }
     }
 
@@ -92,6 +94,52 @@ impl Response {
         Self::problem(status, code, message, None, "")
     }
 
+    pub fn cache_for(mut self, seconds: u64) -> Self {
+        self.cache = format!("public, max-age={seconds}");
+        self
+    }
+
+    pub fn unchanging(mut self) -> Self {
+        self.cache = "public, max-age=31536000, immutable".to_owned();
+        self
+    }
+
+    pub fn no_store(mut self) -> Self {
+        self.cache = "no-store".to_owned();
+        self
+    }
+
+    pub fn without_cache_header(mut self) -> Self {
+        self.cache = String::new();
+        self
+    }
+
+    pub fn not_found() -> Self {
+        Self::refused(404, "not_found", "not found")
+    }
+
+    pub fn no_content() -> Self {
+        Self::carrying("text/plain; charset=utf-8", Body::Empty).with_status(204)
+    }
+
+    pub fn not_modified(tag: &str) -> Self {
+        Self::carrying("text/plain; charset=utf-8", Body::Empty)
+            .with_status(304)
+            .with("etag", tag)
+    }
+
+    pub fn redirect(to: &str) -> Self {
+        Self::carrying("text/plain; charset=utf-8", Body::Empty)
+            .with_status(303)
+            .with("location", to)
+    }
+
+    pub fn moved(to: &str) -> Self {
+        Self::carrying("text/plain; charset=utf-8", Body::Empty)
+            .with_status(308)
+            .with("location", to)
+    }
+
     pub fn with_status(mut self, status: u16) -> Self {
         self.status = status;
         self
@@ -120,23 +168,29 @@ impl Response {
     }
 
     pub fn head_with(&self, keep: bool) -> String {
+        let bodiless = matches!(self.status, 204 | 304);
         let mut head = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n",
+            "HTTP/1.1 {} {}\r\n",
             self.status,
-            status::reason(self.status),
-            self.content_type,
+            status::reason(self.status)
         );
-        match self.body.counted() {
-            Some(length) => {
-                let _ = write!(head, "Content-Length: {length}\r\n");
+        if !bodiless {
+            let _ = write!(head, "Content-Type: {}\r\n", self.content_type);
+            match self.body.counted() {
+                Some(length) => {
+                    let _ = write!(head, "Content-Length: {length}\r\n");
+                }
+                None => head.push_str("Transfer-Encoding: chunked\r\n"),
             }
-            None => head.push_str("Transfer-Encoding: chunked\r\n"),
         }
         let _ = write!(
             head,
-            "Connection: {}\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\n",
+            "Connection: {}\r\nX-Content-Type-Options: nosniff\r\n",
             if keep { "keep-alive" } else { "close" }
         );
+        if !self.cache.is_empty() {
+            let _ = write!(head, "Cache-Control: {}\r\n", self.cache);
+        }
         for (name, value) in self.headers.iter() {
             if name.bytes().any(is_control) || value.bytes().any(is_control) {
                 continue;
@@ -158,8 +212,9 @@ impl Response {
         with_body: bool,
     ) -> std::io::Result<()> {
         let chunked = self.body.counted().is_none();
+        let bodiless = matches!(self.status, 204 | 304);
         out.write_all(self.head_with(keep).as_bytes())?;
-        if with_body {
+        if with_body && !bodiless {
             if chunked {
                 self.body.write_chunked(out)?;
             } else {
@@ -245,6 +300,65 @@ mod tests {
         assert!(said.contains("Content-Length: 5\r\n"), "{said}");
         assert!(said.ends_with("\r\n\r\n"), "{said}");
         assert!(!said.contains("hello"), "{said}");
+    }
+
+    #[test]
+    fn caching_is_the_callers_choice_and_no_store_is_the_default() {
+        assert!(
+            Response::text("x")
+                .head()
+                .contains("Cache-Control: no-store\r\n"),
+            "an answer is not cached unless asked"
+        );
+        assert!(
+            Response::text("x")
+                .cache_for(600)
+                .head()
+                .contains("Cache-Control: public, max-age=600\r\n")
+        );
+        assert!(
+            Response::text("x")
+                .unchanging()
+                .head()
+                .contains("Cache-Control: public, max-age=31536000, immutable\r\n")
+        );
+        assert!(
+            !Response::text("x")
+                .without_cache_header()
+                .head()
+                .contains("Cache-Control")
+        );
+    }
+
+    #[test]
+    fn an_answer_with_no_body_describes_none() {
+        for held in [Response::no_content(), Response::not_modified("\"a\"")] {
+            let head = held.head();
+            assert!(!head.contains("Content-Length"), "{head}");
+            assert!(!head.contains("\r\nContent-Type:"), "{head}");
+        }
+        assert_eq!(Response::no_content().status, 204);
+        assert_eq!(Response::not_modified("\"a\"").status, 304);
+    }
+
+    #[test]
+    fn a_body_is_not_written_for_a_status_that_carries_none() {
+        let mut out = Vec::new();
+        let mut held = Response::text("hello");
+        held.status = 304;
+        held.write_body(&mut out, false, true).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.ends_with("\r\n\r\n"), "{said}");
+        assert!(!said.contains("hello"), "{said}");
+    }
+
+    #[test]
+    fn a_redirect_names_where_it_goes() {
+        let held = Response::redirect("/signed-in");
+        assert_eq!(held.status, 303);
+        assert_eq!(held.header("location"), Some("/signed-in"));
+        assert_eq!(Response::moved("/new").status, 308);
+        assert_eq!(Response::not_found().status, 404);
     }
 
     #[test]
