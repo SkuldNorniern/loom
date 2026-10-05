@@ -24,8 +24,10 @@ Came out of the admin API of a DLP console, which it still serves.
 - `Ui`: writes HTML straight out, with no retained tree. Flat `open`/`close`, or a `scope` guard
   where a Rust scope fits. Selectors carry id and classes. Everything is escaped unless you call
   `raw`.
-- `assets`: serves a directory, with no way out of it. Content types by extension; an extension it
-  does not know is bytes, not a guess.
+- `Body`: `Empty`, `Bytes`, `File` or `Read`. A length it knows becomes `Content-Length`; one it
+  does not becomes `Transfer-Encoding: chunked`. Nothing is buffered to find out.
+- `assets`: serves a directory, with no way out of it, straight from the file. Content types by
+  extension; an extension it does not know is bytes, not a guess.
 - `json`: writer for response bodies. Escapes `<` and control characters.
 - `percent`: decode and encode, `pairs` for query and form bodies.
 - `status`: reason phrases.
@@ -149,10 +151,18 @@ guess differently and that is how requests get smuggled.
 
 `HEAD` is answered with the same head as `GET`, `Content-Length` and all, and no body.
 
-A body is framed by `content-length` or by `transfer-encoding: chunked`. Chunk extensions are
-ignored and trailers are skipped. Giving both framings, or any transfer-encoding whose last coding
-is not `chunked`, is refused as `bad_framing`. A chunked body is held against the same per-route
-limit as any other.
+A request body is framed by `content-length` or by `transfer-encoding: chunked`. Chunk extensions
+are ignored and trailers are skipped. Giving both framings, or any transfer-encoding whose last
+coding is not `chunked`, is refused as `bad_framing`. A chunked body is held against the same
+per-route limit as any other.
+
+A response says `Content-Length` when the body knows its length and goes out `chunked` when it does
+not, so a reader of unknown size needs no buffering and the connection still survives it:
+
+```rust
+Response::file(Path::new("ui/dist/app.wasm"))?        // length from the filesystem
+Response::reader("text/plain; charset=utf-8", from)   // unknown, so chunked
+```
 
 ## Keeping the connection
 
@@ -164,6 +174,6 @@ on a socket the server is about to drop. A connection slot is held for the whole
 
 ## Working on
 
-One thread per connection. No streaming bodies yet; the body is a `Vec<u8>` read whole, and the
-`Body` split waits until something streams. No TLS, async, middleware or compression. See
-`loom_plan.md`.
+One thread per connection. A request body is still read whole before a handler runs; streaming one
+in would change the handler's shape, and waits for the async work. No TLS, async, middleware or
+compression. See `loom_plan.md`.
