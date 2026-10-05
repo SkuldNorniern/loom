@@ -162,6 +162,64 @@ impl Ui {
         self.el_with("a", &[("href", href)], text);
     }
 
+    pub fn form(&mut self, method: &str, action: &str) {
+        let method = if method.eq_ignore_ascii_case("get") {
+            "get"
+        } else {
+            "post"
+        };
+        self.open_with("form", &[("method", method), ("action", action)]);
+    }
+
+    pub fn field(&mut self, label: &str, name: &str, kind: &str, value: &str) {
+        if !is_name(name) {
+            return;
+        }
+        self.el_with("label", &[("for", name)], label);
+        self.void(
+            "input",
+            &[
+                ("id", name),
+                ("name", name),
+                ("type", kind),
+                ("value", value),
+            ],
+        );
+    }
+
+    pub fn hidden(&mut self, name: &str, value: &str) {
+        if is_name(name) {
+            self.void(
+                "input",
+                &[("type", "hidden"), ("name", name), ("value", value)],
+            );
+        }
+    }
+
+    pub fn choice(&mut self, label: &str, name: &str, options: &[(&str, &str)], chosen: &str) {
+        if !is_name(name) {
+            return;
+        }
+        self.el_with("label", &[("for", name)], label);
+        self.open_with("select", &[("id", name), ("name", name)]);
+        for (value, text) in options {
+            if *value == chosen {
+                self.el_with(
+                    "option",
+                    &[("value", value), ("selected", "selected")],
+                    text,
+                );
+            } else {
+                self.el_with("option", &[("value", value)], text);
+            }
+        }
+        self.close();
+    }
+
+    pub fn submit(&mut self, text: &str) {
+        self.el_with("button", &[("type", "submit")], text);
+    }
+
     pub fn depth(&self) -> usize {
         self.open.len()
     }
@@ -407,6 +465,71 @@ mod tests {
         assert!(held.contains("<meta charset=\"utf-8\">"), "{held}");
         assert!(held.contains("<title>명부 &amp; 공지</title>"), "{held}");
         assert!(held.ends_with("<body><p>본문</p></body></html>"), "{held}");
+    }
+
+    #[test]
+    fn a_form_writes_its_method_action_and_labelled_fields() {
+        let mut ui = Ui::new();
+        ui.form("POST", "/api/agents?a=1&b=2");
+        ui.field("Device", "name", "text", "LAB-PC-07");
+        ui.hidden("id", "pc-1");
+        ui.submit("Enrol");
+        ui.close();
+        assert_eq!(
+            ui.finish(),
+            "<form method=\"post\" action=\"/api/agents?a=1&amp;b=2\">\
+             <label for=\"name\">Device</label>\
+             <input id=\"name\" name=\"name\" type=\"text\" value=\"LAB-PC-07\">\
+             <input type=\"hidden\" name=\"id\" value=\"pc-1\">\
+             <button type=\"submit\">Enrol</button></form>"
+        );
+    }
+
+    #[test]
+    fn a_method_other_than_get_is_written_as_post() {
+        let mut ui = Ui::new();
+        ui.form("DELETE", "/x");
+        assert!(ui.finish().contains("method=\"post\""));
+    }
+
+    #[test]
+    fn a_choice_marks_the_one_already_chosen() {
+        let mut ui = Ui::new();
+        ui.choice(
+            "Removal",
+            "removal",
+            &[("open", "Open"), ("protected", "Protected")],
+            "protected",
+        );
+        let held = ui.finish();
+        assert!(
+            held.contains("<option value=\"protected\" selected=\"selected\">Protected</option>"),
+            "{held}"
+        );
+        assert!(
+            held.contains("<option value=\"open\">Open</option>"),
+            "{held}"
+        );
+        assert_eq!(
+            held.matches("selected").count(),
+            2,
+            "only one is chosen: {held}"
+        );
+    }
+
+    #[test]
+    fn a_field_whose_name_is_not_a_name_writes_nothing() {
+        let mut ui = Ui::new();
+        ui.field("x", "a\" onfocus=\"y", "text", "");
+        ui.hidden("b c", "v");
+        ui.choice("x", "", &[], "");
+        ui.field("Kept", "ok", "text", "");
+        let held = ui.finish();
+        assert!(!held.contains("onfocus"), "{held}");
+        assert_eq!(
+            held,
+            "<label for=\"ok\">Kept</label><input id=\"ok\" name=\"ok\" type=\"text\" value=\"\">"
+        );
     }
 
     #[test]
