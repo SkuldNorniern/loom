@@ -16,6 +16,7 @@ pub struct Request {
     pub headers: Headers,
     pub from: String,
     pub body: Vec<u8>,
+    segments: Vec<String>,
     version_keeps_alive: bool,
 }
 
@@ -40,6 +41,11 @@ impl Request {
             id: next_id(),
             method,
             path: percent::decode(path),
+            segments: path
+                .split('/')
+                .filter(|held| !held.is_empty())
+                .map(percent::decode)
+                .collect(),
             query: percent::pairs(query).collect(),
             headers,
             from,
@@ -105,7 +111,7 @@ impl Request {
     }
 
     pub fn segments(&self) -> Vec<&str> {
-        self.path.split('/').filter(|s| !s.is_empty()).collect()
+        self.segments.iter().map(String::as_str).collect()
     }
 
     pub fn error(&self, status: u16, code: &str, message: &str) -> Response {
@@ -224,6 +230,22 @@ mod tests {
         let form = request.form();
         assert_eq!(form.get("host").map(String::as_str), Some("LAB PC"));
         assert_eq!(form.get("at").map(String::as_str), Some("/tmp"));
+    }
+
+    #[test]
+    fn an_encoded_slash_stays_inside_its_segment() {
+        let held = Request::parse("GET /who/a%2Fb/x HTTP/1.1\r\n", Vec::new()).unwrap();
+        assert_eq!(held.segments(), ["who", "a/b", "x"]);
+        assert_eq!(
+            held.path, "/who/a/b/x",
+            "the whole path still reads decoded, for logs"
+        );
+    }
+
+    #[test]
+    fn an_encoded_dot_dot_cannot_add_a_segment() {
+        let held = Request::parse("GET /assets/a%2F..%2Fb HTTP/1.1\r\n", Vec::new()).unwrap();
+        assert_eq!(held.segments(), ["assets", "a/../b"]);
     }
 
     #[test]
