@@ -11,6 +11,7 @@ pub mod response;
 pub mod router;
 pub mod server;
 pub mod status;
+pub mod stop;
 pub mod transport;
 
 pub use body::Body;
@@ -22,3 +23,4 @@ pub use request::Request;
 pub use response::Response;
 pub use router::{Params, Router};
 pub use server::{Limits, Server};
+pub use stop::Stop;

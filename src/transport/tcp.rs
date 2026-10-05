@@ -3,12 +3,15 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use crate::stop::Stop;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Opening {
     pub connections: usize,
     pub timeout: Option<Duration>,
+    pub drain: Option<Duration>,
 }
 
 pub struct Link {
@@ -42,13 +45,20 @@ impl Link {
 pub fn listen(
     listener: TcpListener,
     opening: Opening,
+    stop: Stop,
     busy: impl Fn(&mut TcpStream) + Send + Sync + 'static,
     talk: impl Fn(&mut Link) + Send + Sync + 'static,
 ) -> std::io::Result<()> {
     let busy = Arc::new(busy);
     let talk = Arc::new(talk);
     let open = Arc::new(AtomicUsize::new(0));
+    if let Ok(at) = listener.local_addr() {
+        stop.listening_at(at);
+    }
     for stream in listener.incoming() {
+        if stop.asked() {
+            break;
+        }
         let Ok(mut stream) = stream else { continue };
         let Some(slot) = Slot::take(&open, opening.connections) else {
             busy(&mut stream);
@@ -76,7 +86,18 @@ pub fn listen(
             talk(&mut link);
         });
     }
+    drain(&open, opening.drain);
     Ok(())
+}
+
+fn drain(open: &Arc<AtomicUsize>, most: Option<Duration>) {
+    let since = Instant::now();
+    while open.load(Ordering::SeqCst) > 0 {
+        if most.is_some_and(|most| since.elapsed() >= most) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
 }
 
 struct Slot(Arc<AtomicUsize>);

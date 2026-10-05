@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::protocol::http1::{self, Measure, Reading};
 use crate::request::Request;
 use crate::response::Response;
+use crate::stop::Stop;
 use crate::transport::tcp::{self, Opening};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +16,7 @@ pub struct Limits {
     pub timeout: Option<Duration>,
     pub idle: Option<Duration>,
     pub per_connection: usize,
+    pub drain: Option<Duration>,
 }
 
 impl Default for Limits {
@@ -26,6 +28,7 @@ impl Default for Limits {
             timeout: Some(Duration::from_secs(15)),
             idle: Some(Duration::from_secs(5)),
             per_connection: 100,
+            drain: Some(Duration::from_secs(10)),
         }
     }
 }
@@ -39,6 +42,7 @@ pub struct Server {
     handler: Handler,
     body_limit: Option<BodyLimit>,
     on_refusal: Option<OnRefusal>,
+    stop: Stop,
 }
 
 impl Server {
@@ -48,7 +52,13 @@ impl Server {
             handler: Box::new(handler),
             body_limit: None,
             on_refusal: None,
+            stop: Stop::new(),
         }
+    }
+
+    pub fn stop_with(mut self, stop: Stop) -> Self {
+        self.stop = stop;
+        self
     }
 
     pub fn limits(mut self, limits: Limits) -> Self {
@@ -75,6 +85,7 @@ impl Server {
             handler,
             body_limit,
             on_refusal,
+            stop,
         } = self;
         let handler = Arc::new(handler);
         let body_limit = Arc::new(body_limit);
@@ -82,10 +93,13 @@ impl Server {
         let opening = Opening {
             connections: limits.connections,
             timeout: limits.timeout,
+            drain: limits.drain,
         };
+        let asked = stop.clone();
         tcp::listen(
             listener,
             opening,
+            stop,
             |stream| {
                 let _ = http1::busy().write_to(stream);
             },
@@ -115,7 +129,7 @@ impl Server {
                     ) else {
                         return;
                     };
-                    let last = most != 0 && turn + 1 >= most;
+                    let last = (most != 0 && turn + 1 >= most) || asked.asked();
                     let keep = answer.keep && !last;
                     if http1::write(link.writer(), answer, keep).is_err() || !keep {
                         return;
@@ -140,6 +154,7 @@ mod tests {
         assert_eq!(limits.timeout, Some(Duration::from_secs(15)));
         assert_eq!(limits.idle, Some(Duration::from_secs(5)));
         assert_eq!(limits.per_connection, 100);
+        assert_eq!(limits.drain, Some(Duration::from_secs(10)));
     }
 
     #[test]
@@ -151,6 +166,7 @@ mod tests {
             timeout: None,
             idle: None,
             per_connection: 0,
+            drain: None,
         };
         assert_eq!(
             limits.body,
@@ -162,5 +178,6 @@ mod tests {
             limits.per_connection, 0,
             "zero keeps serving until client closes"
         );
+        assert!(limits.drain.is_none(), "none drains as long as it takes");
     }
 }

@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use loom::{Limits, Params, Request, Response, Router, Server};
 
@@ -57,6 +57,10 @@ fn routed(request: &Request) -> Response {
         )),
         ["upload"] => Response::text(format!("{} bytes", request.body.len())),
         ["boom"] => panic!("a handler fell over"),
+        ["slow"] => {
+            thread::sleep(Duration::from_millis(300));
+            Response::text("took its time")
+        }
         ["stream"] => Response::reader(
             "text/plain; charset=utf-8",
             std::io::Cursor::new("한 줄\n두 줄\n".as_bytes().to_vec()),
@@ -378,6 +382,61 @@ fn a_body_too_large_is_refused_before_it_is_uploaded() {
     assert_eq!(
         line, "HTTP/1.1 413 Content Too Large\r\n",
         "a client asking to continue hears no before it sends 4 KiB"
+    );
+}
+
+#[test]
+fn a_server_asked_to_stop_finishes_what_it_started_and_returns() {
+    let stop = loom::Stop::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let at = listener.local_addr().unwrap().to_string();
+    let served = thread::spawn({
+        let stop = stop.clone();
+        move || Server::new(routed).stop_with(stop).serve(listener)
+    });
+
+    assert!(ask(&at, "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n").ends_with("hello world"));
+
+    let stream = TcpStream::connect(&at).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+    writer
+        .write_all(b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    writer.flush().unwrap();
+    thread::sleep(Duration::from_millis(50));
+
+    stop.now();
+    let said = one_answer(&mut reader);
+    assert!(
+        said.ends_with("took its time"),
+        "a request already running is answered whole: {said}"
+    );
+    assert!(
+        said.contains("Connection: close\r\n"),
+        "and told the connection ends: {said}"
+    );
+
+    let returned = Instant::now();
+    served.join().unwrap().unwrap();
+    assert!(
+        returned.elapsed() < Duration::from_secs(5),
+        "serve returned once its connections drained"
+    );
+    assert!(
+        TcpStream::connect(&at)
+            .and_then(|mut held| {
+                held.write_all(b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")?;
+                let mut said = String::new();
+                held.read_to_string(&mut said)?;
+                Ok(said)
+            })
+            .map(|said| said.is_empty())
+            .unwrap_or(true),
+        "nothing is served after it returns"
     );
 }
 
