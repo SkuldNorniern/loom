@@ -1,3 +1,4 @@
+use std::io::{Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
 use crate::request::Request;
@@ -13,15 +14,86 @@ pub fn under(request: &Request, root: &Path, path: &str) -> Response {
     {
         return Response::not_modified(tag);
     }
-    let answer = match Response::file(&held) {
-        Ok(answer) => answer,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return missing(request),
-        Err(error) => return request.error(500, "read_failed", &error.to_string()),
+    let whole = held.metadata().map(|held| held.len()).unwrap_or_default();
+    let wanted = asked_range(request, tag.as_deref()).map(|asked| within_file(asked, whole));
+    let answer = match wanted {
+        Some(Some(part)) => match part_of(&held, part, content_type(&held)) {
+            Ok(answer) => answer.with(
+                "content-range",
+                format!("bytes {}-{}/{whole}", part.0, part.1),
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return missing(request),
+            Err(error) => return request.error(500, "read_failed", &error.to_string()),
+        },
+        Some(None) => {
+            return Response::refused(
+                416,
+                "range_not_satisfiable",
+                "that range is not in the file",
+            )
+            .with("content-range", format!("bytes */{whole}"));
+        }
+        None => match Response::file(&held) {
+            Ok(answer) => answer,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return missing(request),
+            Err(error) => return request.error(500, "read_failed", &error.to_string()),
+        },
     };
+    let answer = answer.with("accept-ranges", "bytes");
     match tag {
         Some(tag) => answer.with("etag", tag),
         None => answer,
     }
+}
+
+fn part_of(
+    path: &Path,
+    (first, last): (u64, u64),
+    content_type: &str,
+) -> std::io::Result<Response> {
+    let mut held = std::fs::File::open(path)?;
+    held.seek(SeekFrom::Start(first))?;
+    Ok(Response::part(content_type, held, last - first + 1).with_status(206))
+}
+
+fn asked_range(request: &Request, tag: Option<&str>) -> Option<Asked> {
+    let held = request.header("range")?;
+    let held = held.strip_prefix("bytes=")?.trim();
+    if held.contains(',') {
+        return None;
+    }
+    if let Some(unchanged) = request.header("if-range")
+        && tag.is_none_or(|tag| unchanged.trim() != tag)
+    {
+        return None;
+    }
+    let (first, last) = held.split_once('-')?;
+    let (first, last) = (first.trim(), last.trim());
+    match (first.is_empty(), last.is_empty()) {
+        (true, false) => Some(Asked::Last(last.parse().ok()?)),
+        (false, true) => Some(Asked::From(first.parse().ok()?)),
+        (false, false) => Some(Asked::Between(first.parse().ok()?, last.parse().ok()?)),
+        (true, true) => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asked {
+    From(u64),
+    Last(u64),
+    Between(u64, u64),
+}
+
+fn within_file(asked: Asked, whole: u64) -> Option<(u64, u64)> {
+    if whole == 0 {
+        return None;
+    }
+    let (first, last) = match asked {
+        Asked::From(first) => (first, whole - 1),
+        Asked::Last(count) => (whole.saturating_sub(count.min(whole)), whole - 1),
+        Asked::Between(first, last) => (first, last.min(whole - 1)),
+    };
+    (first <= last && first < whole).then_some((first, last))
 }
 
 pub fn tag_of(path: &Path) -> Option<String> {
@@ -116,6 +188,105 @@ mod tests {
             Vec::new(),
         )
         .unwrap()
+    }
+
+    fn asking_range(held: &str) -> Request {
+        Request::parse(&format!("GET / HTTP/1.1\r\nRange: {held}\r\n"), Vec::new()).unwrap()
+    }
+
+    fn served(answer: Response) -> Vec<u8> {
+        answer.body.into_bytes().unwrap()
+    }
+
+    #[test]
+    fn a_range_is_answered_206_with_only_those_bytes() {
+        let at = tree("range");
+        fs::write(at.join("film.bin"), b"0123456789").unwrap();
+
+        let part = under(&asking_range("bytes=2-5"), &at, "/film.bin");
+        assert_eq!(part.status, 206);
+        assert_eq!(part.header("content-range"), Some("bytes 2-5/10"));
+        assert!(
+            part.head().contains("Content-Length: 4\r\n"),
+            "{}",
+            part.head()
+        );
+        assert_eq!(served(part), b"2345");
+
+        let open = under(&asking_range("bytes=7-"), &at, "/film.bin");
+        assert_eq!(open.header("content-range"), Some("bytes 7-9/10"));
+        assert_eq!(served(open), b"789");
+
+        let tail = under(&asking_range("bytes=-3"), &at, "/film.bin");
+        assert_eq!(tail.header("content-range"), Some("bytes 7-9/10"));
+        assert_eq!(served(tail), b"789");
+
+        let past = under(&asking_range("bytes=4-99"), &at, "/film.bin");
+        assert_eq!(
+            past.header("content-range"),
+            Some("bytes 4-9/10"),
+            "a range reaching past the end stops at it"
+        );
+        assert_eq!(served(past), b"456789");
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn a_range_outside_the_file_is_refused_416_and_says_how_long_it_is() {
+        let at = tree("unsatisfiable");
+        fs::write(at.join("film.bin"), b"0123456789").unwrap();
+        let held = under(&asking_range("bytes=10-20"), &at, "/film.bin");
+        assert_eq!(held.status, 416);
+        assert_eq!(held.header("content-range"), Some("bytes */10"));
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn a_range_loom_cannot_answer_gets_the_whole_file() {
+        let at = tree("whole");
+        fs::write(at.join("film.bin"), b"0123456789").unwrap();
+        for held in ["bytes=0-1, 4-5", "items=0-1", "bytes=-", "bytes=x-y"] {
+            let answer = under(&asking_range(held), &at, "/film.bin");
+            assert_eq!(answer.status, 200, "{held}");
+            assert_eq!(served(answer), b"0123456789", "{held}");
+        }
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn a_range_whose_file_changed_under_it_gets_the_whole_file() {
+        let at = tree("if-range");
+        fs::write(at.join("film.bin"), b"0123456789").unwrap();
+        let tag = under(&asked(), &at, "/film.bin")
+            .header("etag")
+            .expect("a tag")
+            .to_owned();
+
+        let asking = |unchanged: &str| {
+            Request::parse(
+                &format!("GET / HTTP/1.1\r\nRange: bytes=2-5\r\nIf-Range: {unchanged}\r\n"),
+                Vec::new(),
+            )
+            .unwrap()
+        };
+        assert_eq!(under(&asking(&tag), &at, "/film.bin").status, 206);
+        let stale = under(&asking("\"0-0\""), &at, "/film.bin");
+        assert_eq!(
+            stale.status, 200,
+            "a part of a file the client no longer holds would corrupt it"
+        );
+        assert_eq!(served(stale), b"0123456789");
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn a_whole_file_says_ranges_can_be_asked_for() {
+        let at = tree("accept");
+        assert_eq!(
+            under(&asked(), &at, "/index.html").header("accept-ranges"),
+            Some("bytes")
+        );
+        fs::remove_dir_all(&at).unwrap();
     }
 
     #[test]
