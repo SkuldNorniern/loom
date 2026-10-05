@@ -46,8 +46,26 @@ nothing:
 loom: cargo build failed, so the server it is running stays up
 ```
 
-`dev` does not reload the browser. Getting in front of the page's own HTML to inject a reload
-listener needs an HTTP client loom does not have yet.
+`dev` reloads the browser too, without a proxy or an HTTP client: it starts the server with
+`LOOM_DEV=1`, and a server started that way serves `/loom/reload` as an event feed and puts five
+lines inside the `</body>` of any `text/html` answer it already had in memory:
+
+```js
+let gone=false;const feed=new EventSource('/loom/reload');
+feed.onerror=()=>{gone=true};feed.onopen=()=>{if(gone)location.reload()};
+```
+
+The restart is the signal. The feed dies when the old server goes, `EventSource` reconnects on its
+own, and the page reloads when it gets through again. Nothing is injected without that variable, so
+a release build has none of it, and a page loom is streaming rather than holding keeps streaming.
+
+`--client <dir>` points at the wasm client when it is not in `client/`. A package with no binary is
+refused by name before cargo runs:
+
+```
+loom: live-client is a wasm client, not a server: it builds a cdylib. run loom from the
+project that serves it, the one with src/main.rs
+```
 
 `--outdir` moves the output and `--quiet` says only what failed. Each step prints what it built and
 how long it took. There is no config file: the server is the package you are in, the client is
