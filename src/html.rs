@@ -48,49 +48,78 @@ impl Ui {
     pub fn page(title: &str) -> Self {
         let mut held = Self::new();
         held.raw("<!doctype html>");
-        held.begin("html");
+        held.open("html");
         {
-            let mut head = held.open("head");
-            head.void("meta", &[("charset", "utf-8")]);
-            head.void(
+            held.open("head");
+            held.void("meta", &[("charset", "utf-8")]);
+            held.void(
                 "meta",
                 &[
                     ("name", "viewport"),
                     ("content", "width=device-width, initial-scale=1"),
                 ],
             );
-            head.said("title", title);
+            held.el("title", title);
+            held.close();
         }
-        held.begin("body");
+        held.open("body");
         held
     }
 
-    pub fn begin(&mut self, tag: &str) {
-        self.begin_with(tag, &[]);
+    pub fn open(&mut self, selector: &str) {
+        self.open_with(selector, &[]);
     }
 
-    pub fn begin_with(&mut self, tag: &str, attributes: &[(&str, &str)]) {
-        if is_name(tag) && !VOID.contains(&tag) {
-            self.start(tag, attributes);
-            self.open.push(tag.to_owned());
+    pub fn open_with(&mut self, selector: &str, attributes: &[(&str, &str)]) {
+        let Some(named) = Named::of(selector) else {
+            return;
+        };
+        if VOID.contains(&named.tag) {
+            return;
         }
-    }
-
-    pub fn open(&mut self, tag: &str) -> Tag<'_> {
-        self.open_with(tag, &[])
-    }
-
-    pub fn open_with(&mut self, tag: &str, attributes: &[(&str, &str)]) -> Tag<'_> {
-        let depth = self.open.len();
-        self.begin_with(tag, attributes);
-        let opened = self.open.len() > depth;
-        Tag { ui: self, opened }
+        self.start(&named, attributes);
+        self.open.push(named.tag.to_owned());
     }
 
     pub fn close(&mut self) {
         if let Some(tag) = self.open.pop() {
             let _ = write!(self.out, "</{tag}>");
         }
+    }
+
+    pub fn scope(&mut self, selector: &str) -> Tag<'_> {
+        self.scope_with(selector, &[])
+    }
+
+    pub fn scope_with(&mut self, selector: &str, attributes: &[(&str, &str)]) -> Tag<'_> {
+        let depth = self.open.len();
+        self.open_with(selector, attributes);
+        let opened = self.open.len() > depth;
+        Tag { ui: self, opened }
+    }
+
+    pub fn void(&mut self, selector: &str, attributes: &[(&str, &str)]) {
+        let Some(named) = Named::of(selector) else {
+            return;
+        };
+        if !VOID.contains(&named.tag) {
+            return;
+        }
+        self.start(&named, attributes);
+    }
+
+    pub fn el(&mut self, selector: &str, text: &str) {
+        self.el_with(selector, &[], text);
+    }
+
+    pub fn el_with(&mut self, selector: &str, attributes: &[(&str, &str)], text: &str) {
+        let depth = self.open.len();
+        self.open_with(selector, attributes);
+        if self.open.len() == depth {
+            return;
+        }
+        self.text(text);
+        self.close();
     }
 
     pub fn text(&mut self, text: &str) {
@@ -101,40 +130,36 @@ impl Ui {
         self.out.push_str(html);
     }
 
-    pub fn void(&mut self, tag: &str, attributes: &[(&str, &str)]) {
-        if is_name(tag) && VOID.contains(&tag) {
-            self.start(tag, attributes);
-        }
-    }
-
-    pub fn said(&mut self, tag: &str, text: &str) {
-        let mut held = self.open(tag);
-        held.text(text);
-    }
-
-    pub fn said_with(&mut self, tag: &str, attributes: &[(&str, &str)], text: &str) {
-        let mut held = self.open_with(tag, attributes);
-        held.text(text);
-    }
-
     pub fn h1(&mut self, text: &str) {
-        self.said("h1", text);
+        self.el("h1", text);
     }
 
     pub fn h2(&mut self, text: &str) {
-        self.said("h2", text);
+        self.el("h2", text);
     }
 
     pub fn h3(&mut self, text: &str) {
-        self.said("h3", text);
+        self.el("h3", text);
     }
 
     pub fn p(&mut self, text: &str) {
-        self.said("p", text);
+        self.el("p", text);
+    }
+
+    pub fn li(&mut self, text: &str) {
+        self.el("li", text);
+    }
+
+    pub fn td(&mut self, text: &str) {
+        self.el("td", text);
+    }
+
+    pub fn th(&mut self, text: &str) {
+        self.el("th", text);
     }
 
     pub fn link(&mut self, href: &str, text: &str) {
-        self.said_with("a", &[("href", href)], text);
+        self.el_with("a", &[("href", href)], text);
     }
 
     pub fn depth(&self) -> usize {
@@ -148,19 +173,65 @@ impl Ui {
         self.out
     }
 
-    fn start(&mut self, tag: &str, attributes: &[(&str, &str)]) {
-        let _ = write!(self.out, "<{tag}");
+    fn start(&mut self, named: &Named<'_>, attributes: &[(&str, &str)]) {
+        let _ = write!(self.out, "<{}", named.tag);
+        if !named.id.is_empty() {
+            self.attribute("id", named.id);
+        }
+        if !named.classes.is_empty() {
+            self.attribute("class", &named.classes.join(" "));
+        }
         for (name, value) in attributes {
-            if !is_name(name) {
-                continue;
+            if is_name(name) {
+                self.attribute(name, value);
             }
-            self.out.push(' ');
-            self.out.push_str(name);
-            self.out.push_str("=\"");
-            escape_into(value, &mut self.out);
-            self.out.push('"');
         }
         self.out.push('>');
+    }
+
+    fn attribute(&mut self, name: &str, value: &str) {
+        self.out.push(' ');
+        self.out.push_str(name);
+        self.out.push_str("=\"");
+        escape_into(value, &mut self.out);
+        self.out.push('"');
+    }
+}
+
+struct Named<'a> {
+    tag: &'a str,
+    id: &'a str,
+    classes: Vec<&'a str>,
+}
+
+impl<'a> Named<'a> {
+    fn of(selector: &'a str) -> Option<Self> {
+        let mut tag = "";
+        let mut id = "";
+        let mut classes = Vec::new();
+        let mut at = 0usize;
+        let mut kind = b'\0';
+        for (index, byte) in selector.bytes().chain([b'\0']).enumerate() {
+            if byte != b'.' && byte != b'#' && byte != b'\0' {
+                continue;
+            }
+            let part = &selector[at..index];
+            match kind {
+                b'\0' => tag = part,
+                b'#' if id.is_empty() => id = part,
+                b'#' => return None,
+                _ => classes.push(part),
+            }
+            kind = byte;
+            at = index + 1;
+        }
+        if !is_name(tag) || (!id.is_empty() && !is_name(id)) {
+            return None;
+        }
+        if classes.iter().any(|held| !is_name(held)) {
+            return None;
+        }
+        Some(Self { tag, id, classes })
     }
 }
 
@@ -195,40 +266,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_tag_closes_itself_when_its_scope_ends() {
+    fn the_flat_style_reads_like_the_markup_it_writes() {
+        let mut ui = Ui::new();
+        ui.open("main");
+        ui.h1("명부");
+        ui.open("ul.roster");
+        ui.li("홍길동");
+        ui.li("박윤재");
+        ui.close();
+        ui.close();
+        assert_eq!(
+            ui.finish(),
+            "<main><h1>명부</h1><ul class=\"roster\"><li>홍길동</li><li>박윤재</li></ul></main>"
+        );
+    }
+
+    #[test]
+    fn a_scope_closes_its_tag_when_it_ends() {
         let mut ui = Ui::new();
         {
-            let mut main = ui.open("main");
+            let mut main = ui.scope("main");
             main.h1("Hello");
         }
         assert_eq!(ui.finish(), "<main><h1>Hello</h1></main>");
     }
 
     #[test]
-    fn tags_nest_as_deep_as_the_scopes_do() {
+    fn a_selector_carries_id_and_classes_in_the_order_written() {
         let mut ui = Ui::new();
-        {
-            let mut card = ui.open_with("div", &[("class", "card")]);
-            card.h2("명부");
-            let mut list = card.open("ul");
-            for name in ["홍길동", "박윤재"] {
-                list.said("li", name);
-            }
-        }
+        ui.el("div#top.card.wide", "x");
+        assert_eq!(ui.finish(), "<div id=\"top\" class=\"card wide\">x</div>");
+    }
+
+    #[test]
+    fn a_selector_without_a_tag_or_with_a_bad_part_writes_nothing() {
+        let mut ui = Ui::new();
+        ui.open(".card");
+        ui.open("div.a b");
+        ui.el("div#a#b", "x");
+        ui.el("p", "kept");
+        assert_eq!(ui.finish(), "<p>kept</p>");
+    }
+
+    #[test]
+    fn attributes_given_beside_a_selector_are_both_written() {
+        let mut ui = Ui::new();
+        ui.el_with("a.link", &[("href", "/x?a=1&b=2")], "go");
         assert_eq!(
             ui.finish(),
-            "<div class=\"card\"><h2>명부</h2><ul><li>홍길동</li><li>박윤재</li></ul></div>"
+            "<a class=\"link\" href=\"/x?a=1&amp;b=2\">go</a>"
         );
     }
 
     #[test]
     fn text_and_attribute_values_are_escaped_without_being_asked() {
         let mut ui = Ui::new();
-        ui.said_with("p", &[("title", "a\"b<c")], "<script>alert(1)</script>");
+        ui.el_with("p", &[("title", "a\"b<c")], "<script>alert(1)</script>");
         assert_eq!(
             ui.finish(),
             "<p title=\"a&quot;b&lt;c\">&lt;script&gt;alert(1)&lt;/script&gt;</p>"
         );
+    }
+
+    #[test]
+    fn a_class_cannot_break_out_of_its_attribute() {
+        let mut ui = Ui::new();
+        ui.el("div.a\"onload=x", "no");
+        ui.el_with("div", &[("class", "a\" onload=\"x")], "yes");
+        let held = ui.finish();
+        assert!(!held.contains("onload=x"), "{held}");
+        assert!(held.contains("&quot; onload=&quot;x"), "{held}");
     }
 
     #[test]
@@ -242,58 +349,53 @@ mod tests {
     #[test]
     fn a_void_element_has_no_closing_tag_and_cannot_be_opened() {
         let mut ui = Ui::new();
-        ui.void("input", &[("type", "text"), ("name", "q")]);
+        ui.void("input#q.field", &[("type", "text")]);
         ui.void("div", &[]);
-        {
-            let mut held = ui.open("br");
-            held.text("no");
-        }
-        assert_eq!(ui.finish(), "<input type=\"text\" name=\"q\">no");
-    }
-
-    #[test]
-    fn a_tag_or_attribute_name_that_is_not_a_name_is_dropped() {
-        let mut ui = Ui::new();
-        {
-            let mut held = ui.open("div onload=x");
-            held.text("kept as text");
-        }
-        ui.said_with("p", &[("onclick\"", "alert(1)"), ("id", "ok")], "yes");
-        assert_eq!(ui.finish(), "kept as text<p id=\"ok\">yes</p>");
+        ui.open("br");
+        assert_eq!(ui.depth(), 0);
+        assert_eq!(
+            ui.finish(),
+            "<input id=\"q\" class=\"field\" type=\"text\">"
+        );
     }
 
     #[test]
     fn whatever_is_left_open_is_closed_when_writing_finishes() {
         let mut ui = Ui::new();
-        ui.begin("section");
-        ui.begin("p");
+        ui.open("section");
+        ui.open("p");
         ui.text("본문");
         assert_eq!(ui.depth(), 2);
         assert_eq!(ui.finish(), "<section><p>본문</p></section>");
     }
 
     #[test]
-    fn begin_and_close_pair_up_without_a_guard() {
-        let mut ui = Ui::new();
-        ui.begin_with("table", &[("class", "roster")]);
-        ui.begin("tr");
-        ui.said("td", "홍길동");
-        ui.close();
-        ui.close();
-        assert_eq!(ui.depth(), 0);
-        assert_eq!(
-            ui.finish(),
-            "<table class=\"roster\"><tr><td>홍길동</td></tr></table>"
-        );
-    }
-
-    #[test]
     fn closing_more_than_was_opened_writes_nothing_extra() {
         let mut ui = Ui::new();
-        ui.said("p", "하나");
+        ui.p("하나");
         ui.close();
         ui.close();
         assert_eq!(ui.finish(), "<p>하나</p>");
+    }
+
+    #[test]
+    fn a_table_reads_as_rows_and_cells() {
+        let mut ui = Ui::new();
+        ui.open("table.roster");
+        ui.open("tr");
+        ui.th("이름");
+        ui.th("학번");
+        ui.close();
+        ui.open("tr");
+        ui.td("홍길동");
+        ui.td("2023****");
+        ui.close();
+        ui.close();
+        assert_eq!(
+            ui.finish(),
+            "<table class=\"roster\"><tr><th>이름</th><th>학번</th></tr>\
+             <tr><td>홍길동</td><td>2023****</td></tr></table>"
+        );
     }
 
     #[test]

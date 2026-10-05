@@ -11,18 +11,17 @@ fn main() -> std::io::Result<()> {
     let router = Router::new()
         .get("/", |_: &Request, _: &Params| {
             let mut page = Ui::page("loom");
-            {
-                let mut main = page.open("main");
-                main.h1("loom");
-                main.p("HTTP/1.1 server for Rust. No dependencies.");
-                let mut list = main.open("ul");
-                for (where_to, what) in [
-                    ("/who/world", "a captured segment"),
-                    ("/upload", "a body, by content-length or chunked"),
-                ] {
-                    let mut item = list.open("li");
-                    item.link(where_to, what);
-                }
+            page.open("main");
+            page.h1("loom");
+            page.p("HTTP/1.1 server for Rust. No dependencies.");
+            page.open("ul.routes");
+            for (where_to, what) in [
+                ("/who/world", "a captured segment"),
+                ("/upload", "a body, by content-length or chunked"),
+            ] {
+                page.open("li");
+                page.link(where_to, what);
+                page.close();
             }
             Response::ui(page)
         })
