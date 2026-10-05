@@ -1,7 +1,6 @@
 # loom
 
-HTTP/1.1 server for Rust. No dependencies. Every limit is a number the caller sets, and every one of
-them can be waived.
+HTTP/1.1 server for Rust. No dependencies.
 
 Came out of the admin API of a DLP console, which it still serves.
 
