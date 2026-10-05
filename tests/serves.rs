@@ -56,6 +56,10 @@ fn routed(request: &Request) -> Response {
             request.query("name").unwrap_or("world")
         )),
         ["upload"] => Response::text(format!("{} bytes", request.body.len())),
+        ["stream"] => Response::reader(
+            "text/plain; charset=utf-8",
+            std::io::Cursor::new("한 줄\n두 줄\n".as_bytes().to_vec()),
+        ),
         ["who"] => match request.bearer() {
             Some(key) => Response::text(format!("key {key}")),
             None => request.error(401, "no_key", "send a bearer token"),
@@ -297,4 +301,70 @@ fn a_head_the_proxies_would_read_differently_is_refused() {
         );
         assert!(said.contains("bad_head"), "{said}");
     }
+}
+
+#[test]
+fn a_body_of_unknown_length_goes_out_chunked_and_keeps_the_connection() {
+    let at = listening(Server::new(routed));
+    let stream = TcpStream::connect(&at).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+
+    writer
+        .write_all(b"GET /stream HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    writer.flush().unwrap();
+
+    let mut head = String::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        if line == "\r\n" {
+            break;
+        }
+        head.push_str(&line);
+    }
+    assert!(head.contains("Transfer-Encoding: chunked\r\n"), "{head}");
+    assert!(!head.contains("Content-Length"), "{head}");
+    assert!(head.contains("Connection: keep-alive\r\n"), "{head}");
+
+    let mut body = Vec::new();
+    loop {
+        let mut size = String::new();
+        reader.read_line(&mut size).unwrap();
+        let want = usize::from_str_radix(size.trim(), 16).unwrap();
+        if want == 0 {
+            break;
+        }
+        let mut chunk = vec![0; want];
+        reader.read_exact(&mut chunk).unwrap();
+        body.extend_from_slice(&chunk);
+        let mut end = [0u8; 2];
+        reader.read_exact(&mut end).unwrap();
+        assert_eq!(&end, b"\r\n");
+    }
+    let mut end = String::new();
+    reader.read_line(&mut end).unwrap();
+    assert_eq!(String::from_utf8(body).unwrap(), "한 줄\n두 줄\n");
+
+    writer
+        .write_all(b"GET /hello HTTP/1.1\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    writer.flush().unwrap();
+    let said = one_answer(&mut reader);
+    assert!(
+        said.ends_with("hello world"),
+        "the socket was still good: {said}"
+    );
+}
+
+#[test]
+fn a_head_request_for_a_chunked_body_sends_no_chunks() {
+    let at = listening(Server::new(routed));
+    let said = ask(&at, "HEAD /stream HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(said.contains("Transfer-Encoding: chunked\r\n"), "{said}");
+    assert!(said.ends_with("\r\n\r\n"), "{said}");
 }

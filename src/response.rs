@@ -1,5 +1,7 @@
+use std::fmt::Write as _;
 use std::io::Write;
 
+use crate::body::Body;
 use crate::header::Headers;
 use crate::json::Json;
 use crate::status;
@@ -7,18 +9,37 @@ use crate::status;
 pub struct Response {
     pub status: u16,
     pub content_type: String,
-    pub body: Vec<u8>,
+    pub body: Body,
     pub headers: Headers,
 }
 
 impl Response {
     pub fn bytes(content_type: impl Into<String>, body: Vec<u8>) -> Self {
+        Self::carrying(content_type, Body::Bytes(body))
+    }
+
+    pub fn carrying(content_type: impl Into<String>, body: Body) -> Self {
         Self {
             status: 200,
             content_type: content_type.into(),
             body,
             headers: Headers::new(),
         }
+    }
+
+    pub fn file(path: &std::path::Path) -> std::io::Result<Self> {
+        let held = std::fs::File::open(path)?;
+        Ok(Self::carrying(
+            crate::assets::content_type(path),
+            Body::File(held),
+        ))
+    }
+
+    pub fn reader(
+        content_type: impl Into<String>,
+        held: impl std::io::Read + Send + 'static,
+    ) -> Self {
+        Self::carrying(content_type, Body::Read(Box::new(held)))
     }
 
     pub fn text(body: impl Into<String>) -> Self {
@@ -100,12 +121,20 @@ impl Response {
 
     pub fn head_with(&self, keep: bool) -> String {
         let mut head = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\n\
-             X-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n",
             self.status,
             status::reason(self.status),
             self.content_type,
-            self.body.len(),
+        );
+        match self.body.counted() {
+            Some(length) => {
+                let _ = write!(head, "Content-Length: {length}\r\n");
+            }
+            None => head.push_str("Transfer-Encoding: chunked\r\n"),
+        }
+        let _ = write!(
+            head,
+            "Connection: {}\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\n",
             if keep { "keep-alive" } else { "close" }
         );
         for (name, value) in self.headers.iter() {
@@ -118,23 +147,24 @@ impl Response {
         head
     }
 
-    pub fn write_to(&self, out: &mut impl Write) -> std::io::Result<()> {
-        self.write_with(out, false)
-    }
-
-    pub fn write_with(&self, out: &mut impl Write, keep: bool) -> std::io::Result<()> {
-        self.write_body(out, keep, true)
+    pub fn write_to(self, out: &mut impl Write) -> std::io::Result<()> {
+        self.write_body(out, false, true)
     }
 
     pub fn write_body(
-        &self,
+        self,
         out: &mut impl Write,
         keep: bool,
         with_body: bool,
     ) -> std::io::Result<()> {
+        let chunked = self.body.counted().is_none();
         out.write_all(self.head_with(keep).as_bytes())?;
         if with_body {
-            out.write_all(&self.body)?;
+            if chunked {
+                self.body.write_chunked(out)?;
+            } else {
+                self.body.write_to(out)?;
+            }
         }
         out.flush()
     }
@@ -179,7 +209,7 @@ mod tests {
     #[test]
     fn problem_carries_code_and_request_id() {
         let body = Response::problem(400, "bad", "no", Some("name"), "7-1").body;
-        let body = String::from_utf8(body).unwrap();
+        let body = String::from_utf8(body.into_bytes().unwrap()).unwrap();
         assert_eq!(
             body,
             r#"{"error":{"code":"bad","message":"no","field":"name","request_id":"7-1"}}"#
@@ -200,7 +230,7 @@ mod tests {
         page.h1("명부");
         let held = Response::ui(page);
         assert_eq!(held.content_type, "text/html; charset=utf-8");
-        let body = String::from_utf8(held.body).unwrap();
+        let body = String::from_utf8(held.body.into_bytes().unwrap()).unwrap();
         assert!(body.starts_with("<!doctype html>"), "{body}");
         assert!(body.contains("<h1>명부</h1>"), "{body}");
         assert!(body.ends_with("</body></html>"), "{body}");

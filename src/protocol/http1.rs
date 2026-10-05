@@ -320,7 +320,7 @@ pub fn answer(
     }
 }
 
-pub fn write(out: &mut impl Write, held: &Answer, keep: bool) -> std::io::Result<()> {
+pub fn write(out: &mut impl Write, held: Answer, keep: bool) -> std::io::Result<()> {
     held.response.write_body(out, keep, held.with_body)
 }
 

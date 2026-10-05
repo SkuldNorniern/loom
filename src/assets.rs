@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::request::Request;
@@ -8,8 +7,8 @@ pub fn under(request: &Request, root: &Path, path: &str) -> Response {
     let Some(held) = within(root, path) else {
         return missing(request);
     };
-    match fs::read(&held) {
-        Ok(bytes) => Response::bytes(content_type(&held), bytes),
+    match Response::file(&held) {
+        Ok(held) => held,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => missing(request),
         Err(error) => request.error(500, "read_failed", &error.to_string()),
     }
@@ -66,6 +65,8 @@ fn missing(request: &Request) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::body as loom_body;
+    use std::fs;
 
     fn asked() -> Request {
         Request::parse("GET / HTTP/1.1\r\n", Vec::new()).unwrap()
@@ -79,6 +80,19 @@ mod tests {
         fs::write(at.join("css/app.css"), ":root{}").unwrap();
         fs::write(at.join("app.wasm"), [0u8, 97, 115, 109]).unwrap();
         at
+    }
+
+    #[test]
+    fn a_file_is_handed_over_without_being_read_into_memory() {
+        let at = tree("stream");
+        let held = under(&asked(), &at, "/index.html");
+        assert!(
+            matches!(held.body, loom_body::Body::File(_)),
+            "{:?}",
+            held.body
+        );
+        assert_eq!(held.body.counted(), Some(31));
+        fs::remove_dir_all(&at).unwrap();
     }
 
     #[test]

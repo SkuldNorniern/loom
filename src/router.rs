@@ -190,7 +190,7 @@ mod tests {
     }
 
     fn body(response: Response) -> String {
-        String::from_utf8(response.body).unwrap()
+        String::from_utf8(response.body.into_bytes().unwrap()).unwrap()
     }
 
     #[test]

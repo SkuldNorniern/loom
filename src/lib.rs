@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod body;
 pub mod header;
 pub mod html;
 pub mod json;
@@ -12,6 +13,7 @@ pub mod server;
 pub mod status;
 pub mod transport;
 
+pub use body::Body;
 pub use header::Headers;
 pub use html::Ui;
 pub use method::Method;

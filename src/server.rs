@@ -113,7 +113,7 @@ impl Server {
                         return;
                     };
                     let keep = answer.keep && turn + 1 < most;
-                    if http1::write(link.writer(), &answer, keep).is_err() || !keep {
+                    if http1::write(link.writer(), answer, keep).is_err() || !keep {
                         return;
                     }
                 }
