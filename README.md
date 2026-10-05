@@ -11,7 +11,7 @@ cargo install --path .
 
 loom new shop
 cd shop
-loom run -- 127.0.0.1:8099
+loom dev -- 127.0.0.1:8099
 ```
 
 `loom new` writes a server, a wasm client and the wiring between them. `loom build` builds the
@@ -25,13 +25,33 @@ dist/
     └── shop_client_bg.wasm
 ```
 
-`loom run` does that and then starts the server, with everything after `--` handed to it.
-`--release` builds both optimised, `--outdir` moves the output, `--quiet` says only what failed.
-Each step prints what it built and how long it took. There is no config file: the server is the
-package you are in, the client is `client/` if it is there, and `public/` is copied if it exists.
+`loom run` is the production one: it builds optimised, then starts the server with everything after
+`--` handed to it. `loom dev` is the other one: a debug build, started, and built again whenever a
+file changes.
 
-`loom dev` and `loom preview` are in `loom_plan.md` and not written yet, so the help does not
-mention them.
+```
+$ loom dev -- 127.0.0.1:8099
+loom: dist ready in 16.4s
+loom: watching 4 files, ctrl-c to stop
+loom: something changed, building
+loom: dist ready in 153ms
+```
+
+It watches `src`, `client/src`, `public` and both `Cargo.toml` files by their modification times,
+and skips `target`, `dist` and anything hidden, so its own output never looks like an edit. A build
+that fails leaves the server that is already running up, and says so, instead of dropping you to
+nothing:
+
+```
+loom: cargo build failed, so the server it is running stays up
+```
+
+`dev` does not reload the browser. Getting in front of the page's own HTML to inject a reload
+listener needs an HTTP client loom does not have yet.
+
+`--outdir` moves the output and `--quiet` says only what failed. Each step prints what it built and
+how long it took. There is no config file: the server is the package you are in, the client is
+`client/` if it is there, and `public/` is copied if it exists.
 
 ## Use
 
