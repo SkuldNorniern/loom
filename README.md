@@ -64,6 +64,16 @@ requests per connection     100        Limits { per_connection, .. }
 
 A connection past the limit gets `503 busy` and is closed.
 
+## What a head must look like
+
+Every line ends CRLF. A request line is exactly method, target and version, the version starts
+`HTTP/`, and the target holds no spaces or control characters. A header name is token characters
+followed straight by its colon: no space before it, no folded continuation lines, at most 100 of
+them. Anything else is refused as `bad_head` rather than guessed at, because a proxy in front may
+guess differently and that is how requests get smuggled.
+
+`HEAD` is answered with the same head as `GET`, `Content-Length` and all, and no body.
+
 A body is framed by `content-length` or by `transfer-encoding: chunked`. Chunk extensions are
 ignored and trailers are skipped. Giving both framings, or any transfer-encoding whose last coding
 is not `chunked`, is refused as `bad_framing`. A chunked body is held against the same per-route
