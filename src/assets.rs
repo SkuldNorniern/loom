@@ -7,11 +7,39 @@ pub fn under(request: &Request, root: &Path, path: &str) -> Response {
     let Some(held) = within(root, path) else {
         return missing(request);
     };
-    match Response::file(&held) {
-        Ok(held) => held,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => missing(request),
-        Err(error) => request.error(500, "read_failed", &error.to_string()),
+    let tag = tag_of(&held);
+    if let Some(tag) = &tag
+        && asked_for(request, tag)
+    {
+        return Response::not_modified(tag);
     }
+    let answer = match Response::file(&held) {
+        Ok(answer) => answer,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return missing(request),
+        Err(error) => return request.error(500, "read_failed", &error.to_string()),
+    };
+    match tag {
+        Some(tag) => answer.with("etag", tag),
+        None => answer,
+    }
+}
+
+pub fn tag_of(path: &Path) -> Option<String> {
+    let held = path.metadata().ok()?;
+    let changed = held
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(format!("\"{:x}-{:x}\"", held.len(), changed.as_millis()))
+}
+
+fn asked_for(request: &Request, tag: &str) -> bool {
+    request.headers_named("if-none-match").any(|held| {
+        held.split(',')
+            .map(str::trim)
+            .any(|one| one == tag || one == "*" || one.trim_start_matches("W/") == tag)
+    })
 }
 
 pub fn within(root: &Path, path: &str) -> Option<PathBuf> {
@@ -80,6 +108,60 @@ mod tests {
         fs::write(at.join("css/app.css"), ":root{}").unwrap();
         fs::write(at.join("app.wasm"), [0u8, 97, 115, 109]).unwrap();
         at
+    }
+
+    fn asking_with(tag: &str) -> Request {
+        Request::parse(
+            &format!("GET / HTTP/1.1\r\nIf-None-Match: {tag}\r\n"),
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_file_carries_a_tag_and_a_second_ask_with_it_is_not_modified() {
+        let at = tree("tag");
+        let first = under(&asked(), &at, "/index.html");
+        assert_eq!(first.status, 200);
+        let tag = first.header("etag").expect("a tag").to_owned();
+
+        let again = under(&asking_with(&tag), &at, "/index.html");
+        assert_eq!(again.status, 304);
+        assert!(again.body.is_empty());
+        assert_eq!(again.header("etag"), Some(tag.as_str()));
+        assert!(
+            !again.head().contains("Content-Length"),
+            "304 carries no length: {}",
+            again.head()
+        );
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn a_tag_that_does_not_match_gets_the_file() {
+        let at = tree("stale");
+        let held = under(&asking_with("\"0-0\""), &at, "/index.html");
+        assert_eq!(held.status, 200);
+        assert!(held.header("etag").is_some());
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn a_tag_changes_when_the_file_does() {
+        let at = tree("changed");
+        let before = tag_of(&at.join("index.html")).expect("a tag");
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        fs::write(at.join("index.html"), "<!doctype html><title>other</title>").unwrap();
+        let after = tag_of(&at.join("index.html")).expect("a tag");
+        assert_ne!(before, after);
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn a_star_matches_whatever_is_there() {
+        let at = tree("star");
+        assert_eq!(under(&asking_with("*"), &at, "/index.html").status, 304);
+        fs::remove_dir_all(&at).unwrap();
     }
 
     #[test]
