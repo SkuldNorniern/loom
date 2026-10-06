@@ -3,7 +3,7 @@ name = "loom"
 version = "0.0.1"
 edition = "2024"
 license = "Apache-2.0"
-description = "HTTP/1.1 server with fixed limits and no dependencies"
+description = "Rust Web-Framework that is simple and perf optimized"
 repository = "https://github.com/SkuldNorniern/loom"
 
 [dependencies]
