@@ -8,6 +8,32 @@ pub fn under(request: &Request, root: &Path, path: &str) -> Response {
     let Some(held) = within(root, path) else {
         return missing(request);
     };
+    let kind = content_type(&held);
+    if request.header("range").is_none()
+        && let Some((packed, coding)) = already_packed(request, &held)
+    {
+        let tag = tag_of(&packed);
+        if let Some(tag) = &tag
+            && holds(request, tag)
+        {
+            return Response::not_modified(tag).revalidated();
+        }
+        let answer = match Response::file(&packed) {
+            Ok(answer) => answer,
+            Err(_) => return missing(request),
+        };
+        let answer = Response {
+            content_type: kind.to_owned(),
+            ..answer
+        }
+        .with("content-encoding", coding)
+        .with("vary", "accept-encoding")
+        .revalidated();
+        return match tag {
+            Some(tag) => answer.with("etag", tag),
+            None => answer,
+        };
+    }
     let tag = tag_of(&held);
     if let Some(tag) = &tag
         && holds(request, tag)
@@ -94,6 +120,29 @@ fn within_file(asked: Asked, whole: u64) -> Option<(u64, u64)> {
         Asked::Between(first, last) => (first, last.min(whole - 1)),
     };
     (first <= last && first < whole).then_some((first, last))
+}
+
+fn already_packed(request: &Request, held: &Path) -> Option<(PathBuf, &'static str)> {
+    let asked = request.header("accept-encoding")?.to_ascii_lowercase();
+    let wanted = |coding: &str| {
+        asked
+            .split(',')
+            .map(|held| held.split(';').next().unwrap_or_default().trim())
+            .any(|held| held == coding)
+    };
+    let named = held.as_os_str().to_owned();
+    for (coding, suffix) in [("br", ".br"), ("gzip", ".gz")] {
+        if !wanted(coding) {
+            continue;
+        }
+        let mut beside = named.clone();
+        beside.push(suffix);
+        let beside = PathBuf::from(beside);
+        if beside.is_file() {
+            return Some((beside, coding));
+        }
+    }
+    None
 }
 
 pub fn tag_of(path: &Path) -> Option<String> {
@@ -276,6 +325,96 @@ mod tests {
             "a part of a file the client no longer holds would corrupt it"
         );
         assert_eq!(served(stale), b"0123456789");
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    fn asking_for(coding: &str) -> Request {
+        Request::parse(
+            &format!("GET / HTTP/1.1\r\nAccept-Encoding: {coding}\r\n"),
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_file_packed_beside_it_is_served_when_client_takes_that_coding() {
+        let at = tree("packed");
+        fs::write(at.join("app.js"), "const x = 1;\n").unwrap();
+        fs::write(at.join("app.js.gz"), b"pretend gzip").unwrap();
+        fs::write(at.join("app.js.br"), b"pretend brotli").unwrap();
+
+        let held = under(&asking_for("br, gzip"), &at, "/app.js");
+        assert_eq!(held.header("content-encoding"), Some("br"));
+        assert_eq!(held.header("vary"), Some("accept-encoding"));
+        assert_eq!(
+            held.content_type, "text/javascript; charset=utf-8",
+            "the type is of what was asked for, not of the packed file"
+        );
+        assert_eq!(served(held), b"pretend brotli");
+
+        let held = under(&asking_for("gzip"), &at, "/app.js");
+        assert_eq!(held.header("content-encoding"), Some("gzip"));
+        assert_eq!(served(held), b"pretend gzip");
+
+        let held = under(&asked(), &at, "/app.js");
+        assert_eq!(held.header("content-encoding"), None);
+        assert_eq!(served(held), b"const x = 1;\n");
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn a_coding_with_no_file_beside_it_gets_what_is_there() {
+        let at = tree("unpacked");
+        fs::write(at.join("app.js"), "const x = 1;\n").unwrap();
+        let held = under(&asking_for("br"), &at, "/app.js");
+        assert_eq!(held.header("content-encoding"), None);
+        assert_eq!(served(held), b"const x = 1;\n");
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn a_range_is_answered_from_file_itself_and_not_from_packed_one() {
+        let at = tree("packed-range");
+        fs::write(at.join("film.bin"), b"0123456789").unwrap();
+        fs::write(at.join("film.bin.br"), b"packed").unwrap();
+        let held = Request::parse(
+            "GET / HTTP/1.1\r\nAccept-Encoding: br\r\nRange: bytes=2-5\r\n",
+            Vec::new(),
+        )
+        .unwrap();
+        let held = under(&held, &at, "/film.bin");
+        assert_eq!(held.status, 206);
+        assert_eq!(held.header("content-encoding"), None);
+        assert_eq!(
+            served(held),
+            b"2345",
+            "a range of packed bytes is not a range"
+        );
+        fs::remove_dir_all(&at).unwrap();
+    }
+
+    #[test]
+    fn packed_and_plain_carry_their_own_tags() {
+        let at = tree("packed-tag");
+        fs::write(at.join("app.js"), "const x = 1;\n").unwrap();
+        fs::write(at.join("app.js.br"), b"packed").unwrap();
+        let packed = under(&asking_for("br"), &at, "/app.js");
+        let tag = packed.header("etag").expect("a tag").to_owned();
+        let plain = under(&asked(), &at, "/app.js")
+            .header("etag")
+            .expect("a tag")
+            .to_owned();
+        assert_ne!(
+            tag, plain,
+            "a client caching one must not be given the other"
+        );
+
+        let asking = Request::parse(
+            &format!("GET / HTTP/1.1\r\nAccept-Encoding: br\r\nIf-None-Match: {tag}\r\n"),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(under(&asking, &at, "/app.js").status, 304);
         fs::remove_dir_all(&at).unwrap();
     }
 
