@@ -9,7 +9,7 @@ const VOID: [&str; 14] = [
 #[derive(Debug, Default)]
 pub struct Ui {
     out: String,
-    open: Vec<String>,
+    open: Vec<Option<String>>,
 }
 
 #[must_use = "a tag closes when its guard is dropped; bind it, or use begin and close"]
@@ -74,15 +74,13 @@ impl Ui {
         let Some(named) = Named::of(selector) else {
             return;
         };
-        if VOID.contains(&named.tag) {
-            return;
-        }
         self.start(&named, attributes);
-        self.open.push(named.tag.to_owned());
+        let paired = !VOID.contains(&named.tag);
+        self.open.push(paired.then(|| named.tag.to_owned()));
     }
 
     pub fn close(&mut self) {
-        if let Some(tag) = self.open.pop() {
+        if let Some(Some(tag)) = self.open.pop() {
             let _ = write!(self.out, "</{tag}>");
         }
     }
@@ -102,10 +100,10 @@ impl Ui {
         let Some(named) = Named::of(selector) else {
             return;
         };
-        if !VOID.contains(&named.tag) {
-            return;
-        }
         self.start(&named, attributes);
+        if !VOID.contains(&named.tag) {
+            let _ = write!(self.out, "</{}>", named.tag);
+        }
     }
 
     pub fn el(&mut self, selector: &str, text: &str) {
@@ -405,15 +403,33 @@ mod tests {
     }
 
     #[test]
-    fn a_void_element_has_no_closing_tag_and_cannot_be_opened() {
+    fn a_void_element_has_no_closing_tag_but_an_element_asked_for_is_always_written() {
         let mut ui = Ui::new();
         ui.void("input#q.field", &[("type", "text")]);
-        ui.void("div", &[]);
-        ui.open("br");
-        assert_eq!(ui.depth(), 0);
+        assert_eq!(ui.depth(), 0, "a void element is never left open");
+        ui.void("canvas#arena", &[]);
+        ui.void("div.card", &[]);
         assert_eq!(
             ui.finish(),
-            "<input id=\"q\" class=\"field\" type=\"text\">"
+            "<input id=\"q\" class=\"field\" type=\"text\">\
+             <canvas id=\"arena\"></canvas><div class=\"card\"></div>",
+            "a tag that is not void is written as an empty element, never dropped"
+        );
+    }
+
+    #[test]
+    fn opening_a_void_element_writes_it_and_swallows_its_close() {
+        let mut ui = Ui::new();
+        ui.open("p");
+        ui.open("br");
+        assert_eq!(ui.depth(), 2);
+        ui.close();
+        ui.text("after");
+        ui.close();
+        assert_eq!(
+            ui.finish(),
+            "<p><br>after</p>",
+            "the close belongs to the br, so it cannot close the p early"
         );
     }
 
