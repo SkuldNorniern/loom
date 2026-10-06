@@ -79,7 +79,20 @@ loom::assets::under(request, Path::new("ui/dist"), &request.path)
 ```
 
 Serves a directory and nothing outside it. ETag, `304`, byte ranges as `206`, and `no-cache` so a
-browser keeps its copy and asks about it.
+browser keeps its copy and asks about it. An `app.wasm.br` or `.gz` beside the file is served to a
+client that takes that coding, with the type of the file asked for.
+
+## Watching it
+
+```rust
+Server::new(handler)
+    .on_answer(|request, answered| println!("{} {} {}", request.method, request.path, answered.status))
+    .answer_refusal(|refusal| Some(Response::html(page(refusal.status))))
+```
+
+`on_answer` is told the status, body length and seconds for every answer. `answer_refusal` dresses
+what loom refuses on its own, a panicking handler and `503 busy` included, so a site is not stuck
+with JSON errors. Answering `None` keeps the JSON.
 
 ## Examples
 
