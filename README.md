@@ -101,7 +101,12 @@ Two examples to run:
 ```
 cargo run --example hello
 cargo run --example site -- 127.0.0.1:8099 ./public
+cargo run --example live -- 127.0.0.1:8099
+cargo run --example game -- 0.0.0.0:8099
 ```
+
+`live` and `game` need their clients built first, with
+`examples/live-client/build.sh` and `examples/game-client/build.sh`.
 
 `site` is 45 lines and serves a directory with tags, ranges and conditional requests, one route of
 its own, and enter to stop.
@@ -213,6 +218,11 @@ feed.note("still here");
 goes: `watching.retain(|feed| feed.send(&held))`. A newline inside `data` becomes another `data:`
 line, so JSON with newlines in it cannot end the event early. The answer carries no length and goes
 out chunked, one write per event, and `TCP_NODELAY` means the event leaves as it is written.
+
+`examples/game.rs` is a game: everyone who opens it on a phone gets a dot, drags to steer it and
+eats pellets, and sees everyone else move. The event feed is the player, so joining is connecting
+and a player is dropped on the tick after their feed dies. State goes out as one line a tick,
+`p:id,x,y,score,hue|...`, and the client draws it on a canvas from Rust.
 
 `examples/live.rs` is a board a server thread moves 12 times a second, a browser drawing it from
 `EventSource`, and buttons that `POST` back. A watcher holds a connection slot for as long as it
