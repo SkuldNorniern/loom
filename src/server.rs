@@ -40,12 +40,16 @@ impl Default for Limits {
 type Handler = Box<dyn Fn(&Request) -> Response + Send + Sync>;
 type BodyLimit = Box<Measure>;
 type OnRefusal = Box<dyn Fn(&str, &http1::Refusal) + Send + Sync>;
+type Instead = Box<http1::Instead>;
+type Noting = Box<http1::Noting>;
 
 pub struct Server {
     limits: Limits,
     handler: Handler,
     body_limit: Option<BodyLimit>,
     on_refusal: Option<OnRefusal>,
+    instead: Option<Instead>,
+    noting: Option<Noting>,
     stop: Stop,
 }
 
@@ -61,8 +65,26 @@ impl Server {
             handler,
             body_limit: None,
             on_refusal: None,
+            instead: None,
+            noting: None,
             stop: Stop::new(),
         }
+    }
+
+    pub fn answer_refusal(
+        mut self,
+        with: impl Fn(&http1::Refusal) -> Option<Response> + Send + Sync + 'static,
+    ) -> Self {
+        self.instead = Some(Box::new(with));
+        self
+    }
+
+    pub fn on_answer(
+        mut self,
+        told: impl Fn(&Request, &http1::Answered) + Send + Sync + 'static,
+    ) -> Self {
+        self.noting = Some(Box::new(told));
+        self
     }
 
     pub fn stop_with(mut self, stop: Stop) -> Self {
@@ -94,11 +116,15 @@ impl Server {
             handler,
             body_limit,
             on_refusal,
+            instead,
+            noting,
             stop,
         } = self;
         let handler = Arc::new(handler);
         let body_limit = Arc::new(body_limit);
         let on_refusal = Arc::new(on_refusal);
+        let instead = Arc::new(instead);
+        let noting = Arc::new(noting);
         let opening = Opening {
             connections: limits.connections,
             timeout: limits.timeout,
@@ -109,8 +135,11 @@ impl Server {
             listener,
             opening,
             stop,
-            |stream| {
-                let _ = http1::busy().write_to(stream);
+            {
+                let instead = Arc::clone(&instead);
+                move |stream: &mut std::net::TcpStream| {
+                    let _ = http1::busy(instead.as_deref()).write_to(stream);
+                }
             },
             move |link| {
                 let most = limits.per_connection;
@@ -136,7 +165,11 @@ impl Server {
                         &from,
                         held,
                         handler.as_ref(),
-                        on_refusal.as_deref(),
+                        http1::Watching {
+                            told: on_refusal.as_deref(),
+                            instead: instead.as_deref(),
+                            noting: noting.as_deref(),
+                        },
                     ) else {
                         return;
                     };

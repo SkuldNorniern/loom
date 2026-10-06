@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -674,6 +675,76 @@ fn an_event_reaches_the_client_when_it_is_sent_and_not_at_the_end() {
     assert!(
         seen[2].1 > seen[0].1,
         "events arrive as they are sent, not in one block"
+    );
+}
+
+#[test]
+fn refusals_can_be_answered_by_site_itself_instead_of_json() {
+    let at = listening(
+        Server::new(routed)
+            .body_limit(|_, _| 8)
+            .answer_refusal(|refusal| {
+                Some(Response::html(format!(
+                    "<!doctype html><h1>{}</h1><p>{}</p>",
+                    refusal.status, refusal.code
+                )))
+            }),
+    );
+    let said = ask(
+        &at,
+        "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 64\r\n\r\n",
+    );
+    assert!(
+        said.starts_with("HTTP/1.1 413 Content Too Large\r\n"),
+        "the status is still the refusal's: {said}"
+    );
+    assert!(said.contains("Content-Type: text/html"), "{said}");
+    assert!(
+        said.ends_with("<h1>413</h1><p>body_too_large</p>"),
+        "{said}"
+    );
+
+    let said = ask(&at, "GET /boom HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(
+        said.ends_with("<h1>500</h1><p>handler_panicked</p>"),
+        "a panic is a refusal the site can dress too: {said}"
+    );
+}
+
+#[test]
+fn a_refusal_left_alone_stays_json() {
+    let at = listening(Server::new(routed).answer_refusal(|_| None));
+    let said = ask(&at, "GET /boom HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(said.contains("Content-Type: application/json"), "{said}");
+    assert!(said.contains("\"code\":\"internal_error\""), "{said}");
+}
+
+#[test]
+fn every_answer_is_told_to_whoever_keeps_the_log() {
+    let said: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let at = listening(Server::new(routed).on_answer({
+        let said = Arc::clone(&said);
+        move |request, answered| {
+            said.lock().unwrap().push(format!(
+                "{} {} {} {:?} {}",
+                request.method,
+                request.path,
+                answered.status,
+                answered.bytes,
+                answered.seconds >= 0.0
+            ));
+        }
+    }));
+    ask(&at, "GET /hello?name=x HTTP/1.1\r\nHost: x\r\n\r\n");
+    ask(&at, "GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n");
+    let held = said.lock().unwrap().clone();
+    assert_eq!(
+        held,
+        [
+            "GET /hello 200 Some(7) true".to_owned(),
+            "GET /nothing 404 Some(100) true".to_owned(),
+        ],
+        "the path is the one that was routed, without its query"
     );
 }
 

@@ -12,6 +12,15 @@ const BLOCK: usize = 16 * 1024;
 pub type Measure = dyn Fn(&str, &str) -> usize + Send + Sync;
 pub type Answering = dyn Fn(&Request) -> Response + Send + Sync;
 pub type Telling = dyn Fn(&str, &Refusal) + Send + Sync;
+pub type Instead = dyn Fn(&Refusal) -> Option<Response> + Send + Sync;
+pub type Noting = dyn Fn(&Request, &Answered) + Send + Sync;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Answered {
+    pub status: u16,
+    pub bytes: Option<u64>,
+    pub seconds: f64,
+}
 
 #[derive(Clone, Copy)]
 pub struct Reading<'a> {
@@ -409,52 +418,67 @@ pub struct Answer {
     pub with_body: bool,
 }
 
+pub struct Watching<'a> {
+    pub told: Option<&'a Telling>,
+    pub instead: Option<&'a Instead>,
+    pub noting: Option<&'a Noting>,
+}
+
 pub fn answer(
     reader: &mut impl BufRead,
     interim: &mut impl Write,
     from: &str,
     held: Reading<'_>,
     handler: &Answering,
-    told: Option<&Telling>,
+    watching: Watching<'_>,
 ) -> Option<Answer> {
+    let since = Instant::now();
     match read(reader, interim, from, held) {
         Ok(Some(request)) => {
             let keep = request.wants_keeping_alive();
             let with_body = request.method != Method::Head;
             let held = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&request)));
-            match held {
-                Ok(response) => Some(Answer {
-                    response,
-                    keep,
-                    with_body,
-                }),
+            let (response, keep) = match held {
+                Ok(response) => (response, keep),
                 Err(_) => {
-                    if let Some(told) = told {
-                        let mut refusal =
-                            Refusal::new(500, "handler_panicked", "handler did not finish");
-                        refusal.method = request.method.as_str().to_owned();
-                        refusal.path = request.path.clone();
+                    let mut refusal =
+                        Refusal::new(500, "handler_panicked", "handler did not finish");
+                    refusal.method = request.method.as_str().to_owned();
+                    refusal.path = request.path.clone();
+                    if let Some(told) = watching.told {
                         told(from, &refusal);
                     }
-                    Some(Answer {
-                        response: Response::refused(
-                            500,
-                            "internal_error",
-                            "request could not be answered",
-                        ),
-                        keep: false,
-                        with_body,
-                    })
+                    let held = instead_of(&refusal, watching.instead).unwrap_or_else(|| {
+                        Response::refused(500, "internal_error", "request could not be answered")
+                    });
+                    (held, false)
                 }
+            };
+            if let Some(noting) = watching.noting {
+                noting(
+                    &request,
+                    &Answered {
+                        status: response.status,
+                        bytes: response.body.counted(),
+                        seconds: since.elapsed().as_secs_f64(),
+                    },
+                );
             }
+            Some(Answer {
+                response,
+                keep,
+                with_body,
+            })
         }
         Ok(None) => None,
         Err(refusal) => {
-            if let Some(told) = told {
+            if let Some(told) = watching.told {
                 told(from, &refusal);
             }
             Some(Answer {
-                response: Response::refused(refusal.status, refusal.code, &refusal.message),
+                response: instead_of(&refusal, watching.instead).unwrap_or_else(|| {
+                    Response::refused(refusal.status, refusal.code, &refusal.message)
+                }),
                 keep: false,
                 with_body: true,
             })
@@ -462,12 +486,20 @@ pub fn answer(
     }
 }
 
+fn instead_of(refusal: &Refusal, instead: Option<&Instead>) -> Option<Response> {
+    instead
+        .and_then(|held| held(refusal))
+        .map(|held| held.with_status(refusal.status))
+}
+
 pub fn write(out: &mut impl Write, held: Answer, keep: bool) -> std::io::Result<()> {
     held.response.write_body(out, keep, held.with_body)
 }
 
-pub fn busy() -> Response {
-    Response::refused(503, "busy", "too many connections")
+pub fn busy(instead: Option<&Instead>) -> Response {
+    let refusal = Refusal::new(503, "busy", "too many connections");
+    instead_of(&refusal, instead)
+        .unwrap_or_else(|| Response::refused(refusal.status, refusal.code, &refusal.message))
 }
 
 #[cfg(test)]
