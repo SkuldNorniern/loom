@@ -1,8 +1,6 @@
 # loom
 
-HTTP/1.1 server for Rust. No dependencies.
-
-Came out of the admin API of a DLP console, which it still serves.
+HTTP/1.1 server for Rust. Minimal dependencies.
 
 ## Its own command
 
@@ -92,19 +90,4 @@ cargo run --example live -- 127.0.0.1:8099
 cargo run --example game -- 0.0.0.0:8099
 ```
 
-`site` is a static site in 45 lines. `game` is a game: open it on a phone, drag to steer, eat
-pellets, see everyone else. `live` and `game` need their clients built first, with
-`examples/live-client/build.sh` and `examples/game-client/build.sh`. Both clients are Rust on wasm,
-with one line of JavaScript on the page to start the module, because a browser has no other way.
 
-## Also here
-
-`Limits` for headers, body, connections, timeouts, arrival rate and connection reuse, every one of
-them waivable, with `body_limit` answering per route. `Stop` for a shutdown that drains. Cookies
-with `HttpOnly` and `SameSite=Strict` unless given up. `Expect: 100-continue`. A panicking handler
-answered `500` with the server still serving. `Json`, `percent`, `Headers`, `Method`, `status`.
-
-## Not here
-
-One thread per connection. A request body is read whole before a handler runs. No TLS, async,
-middleware or compression.
