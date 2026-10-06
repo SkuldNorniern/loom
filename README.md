@@ -46,30 +46,16 @@ nothing:
 loom: cargo build failed, so the server it is running stays up
 ```
 
-`dev` reloads the browser too, without a proxy or an HTTP client: it starts the server with
-`LOOM_DEV=1`, and a server started that way serves `/loom/reload` as an event feed and puts five
-lines inside the `</body>` of any `text/html` answer it already had in memory:
+`dev` reloads the browser too. It starts the server with `LOOM_DEV=1`, and a server started that
+way serves `/loom/reload` as an event feed and drops a two-line listener into the `</body>` of a
+`text/html` answer it is holding as bytes. The restart is the signal: the feed dies with the old
+server, the browser reconnects by itself, and the page reloads when it gets through. Without the
+variable nothing is injected, so a release build has none of it. No proxy and no HTTP client.
 
-```js
-let gone=false;const feed=new EventSource('/loom/reload');
-feed.onerror=()=>{gone=true};feed.onopen=()=>{if(gone)location.reload()};
-```
-
-The restart is the signal. The feed dies when the old server goes, `EventSource` reconnects on its
-own, and the page reloads when it gets through again. Nothing is injected without that variable, so
-a release build has none of it, and a page loom is streaming rather than holding keeps streaming.
-
-`--client <dir>` points at the wasm client when it is not in `client/`. A package with no binary is
-refused by name before cargo runs:
-
-```
-loom: live-client is a wasm client, not a server: it builds a cdylib. run loom from the
-project that serves it, the one with src/main.rs
-```
-
-`--outdir` moves the output and `--quiet` says only what failed. Each step prints what it built and
-how long it took. There is no config file: the server is the package you are in, the client is
-`client/` if it is there, and `public/` is copied if it exists.
+`--client <dir>` points at the wasm client when it is not in `client/`. `--outdir` moves the output,
+`--quiet` says only what failed. A package with no binary is refused by name before cargo runs.
+There is no config file: the server is the package you are in, the client is `client/` if it is
+there, and `public/` is copied if it exists.
 
 ## Use
 
@@ -96,7 +82,7 @@ anything is decoded, so `%2F` stays inside its segment and cannot change which r
 Captures arrive percent-decoded. An exact segment wins over a capture at the same depth. `*rest`
 must be last and must match at least one segment.
 
-Two examples to run:
+Examples to run:
 
 ```
 cargo run --example hello
@@ -105,11 +91,9 @@ cargo run --example live -- 127.0.0.1:8099
 cargo run --example game -- 0.0.0.0:8099
 ```
 
-`live` and `game` need their clients built first, with
+`site` is 45 lines: a directory with tags, ranges and conditional requests, one route of its own,
+and enter to stop. `live` and `game` need their clients built first, with
 `examples/live-client/build.sh` and `examples/game-client/build.sh`.
-
-`site` is 45 lines and serves a directory with tags, ranges and conditional requests, one route of
-its own, and enter to stop.
 
 ## HTML
 
@@ -138,15 +122,15 @@ return cannot emit an unbalanced document. Closing more than was opened writes n
 The selector carries the id and classes, so most elements need no attribute list:
 
 ```rust
-page.open("ul.roster");
 page.el("div#top.card.wide", "text");
 page.void("input#q.field", &[("type", "text")]);
 page.el_with("a.link", &[("href", "/x?a=1&b=2")], "go");
 ```
 
-Text and attribute values are escaped, selectors included, so a class cannot break out of its
-quotes. `raw` is the one way past escaping. A selector that is not a tag, or that carries a part
-which is not a name, writes nothing rather than something malformed.
+`void` writes `<input>` for a void tag and `<canvas></canvas>` for one that is not, so an element
+asked for is never dropped. Text and attribute values are escaped, selectors included, so a class
+cannot break out of its quotes. `raw` is the one way past escaping. A selector that is not a tag
+writes nothing rather than something malformed.
 
 Forms, with the names doubling as the labels' `for` and the inputs' `id`:
 
@@ -162,7 +146,7 @@ page.close();
 A field whose name is not a name writes nothing, so a name cannot carry an event handler in.
 Anything but `get` is written as `post`, because that is all a browser form can send.
 
-Where a Rust scope does match the nesting, `scope` returns a guard that closes its tag when it ends:
+Where a Rust scope matches the nesting, `scope` returns a guard that closes its tag when it ends:
 
 ```rust
 let mut main = page.scope("main");
@@ -191,10 +175,10 @@ page.without_cache_header()           // say nothing and let a proxy decide
 
 A served file also says `Accept-Ranges: bytes`. `Range: bytes=2-5`, `bytes=7-` and `bytes=-3` are
 `206` with `Content-Range` and only those bytes, read from that offset and never the whole file. A
-range past the end stops at the end. One that starts past it is `416` with `Content-Range:
-bytes */<length>`. A range loom cannot answer, such as several at once or a unit that is not bytes,
-gets the whole file. So does an `If-Range` that no longer matches the file's tag, because a piece of
-a file the client stopped holding would corrupt what it is building.
+range past the end stops at the end; one starting past it is `416`. A range loom cannot answer, such
+as several at once or a unit that is not bytes, gets the whole file, and so does an `If-Range` that
+no longer matches the tag, because a piece of a file the client stopped holding would corrupt what
+it is building.
 
 ## Live updates
 
@@ -219,26 +203,17 @@ goes: `watching.retain(|feed| feed.send(&held))`. A newline inside `data` become
 line, so JSON with newlines in it cannot end the event early. The answer carries no length and goes
 out chunked, one write per event, and `TCP_NODELAY` means the event leaves as it is written.
 
-`examples/game.rs` is a game: everyone who opens it on a phone gets a dot, drags to steer it and
-eats pellets, and sees everyone else move. The event feed is the player, so joining is connecting
-and a player is dropped on the tick after their feed dies. State goes out as one line a tick,
-`p:id,x,y,score,hue|...`, and the client draws it on a canvas from Rust.
+Two examples run on it. `live` is a board a server thread moves 12 times a second. `game` is a game:
+open it on a phone, drag to steer your dot, eat pellets, watch everyone else. Its feed is the
+player, so joining is connecting and a player goes on the tick after their feed dies.
 
-`examples/live.rs` is a board a server thread moves 12 times a second, a browser drawing it from
-`EventSource`, and buttons that `POST` back. A watcher holds a connection slot for as long as it
-watches, so raise `connections` and set `timeout: None` when that is the shape of the thing.
+A watcher holds a connection slot for as long as it watches, so raise `connections` and set
+`timeout: None` when that is the shape of the thing.
 
-The client is Rust, compiled to wasm:
-
-```
-examples/live-client/build.sh
-cargo run --example live -- 127.0.0.1:8099
-```
-
-`EventSource`, the parse, the two style properties and the `POST` all live in
-`examples/live-client/src/lib.rs`. The page carries one line of JavaScript,
-`import init from './live_client.js'; init();`, because a browser has no other way to start a wasm
-module and wasm reaches the DOM only through an import object. Everything above that line is Rust.
+Both clients are Rust on wasm: the feed, the parse, the canvas and the `POST` are all in
+`src/lib.rs`. Each page carries one line of JavaScript, `import init from './x_client.js'; init();`,
+because a browser cannot start a wasm module any other way, and wasm reaches the DOM only through an
+import object. Nothing above that line is JavaScript.
 
 ## Cookies
 
@@ -263,7 +238,7 @@ connections at once         64         Limits { connections, .. }
 read and write timeout      15s        Limits { timeout, .. }
 wait for the next request   5s         Limits { idle, .. }
 grace before rate is held   30s        Limits { arrival, .. }
-slowest body loom will read  16 KiB/s   Limits { slowest, .. }
+slowest body loom reads     16 KiB/s   Limits { slowest, .. }
 requests per connection     100        Limits { per_connection, .. }
 drain before serve returns  10s        Limits { drain, .. }
 ```
@@ -292,15 +267,11 @@ The body limit is the one worth keeping. A body is read whole into memory before
 `usize::MAX` lets one request take the machine's memory with it. Raise it for the route that needs
 it and leave the rest of the server out of it.
 
-`arrival` and `slowest` are what stop a client that sends a request one byte at a time. Per-read
-timeouts never fire against that, because every read does arrive. For the first `arrival` loom reads
-whatever comes. After it, the request has to have averaged `slowest` bytes a second or it is `408`,
-checked at every read boundary.
-
-A rate, not a deadline, because a deadline is only right while bodies are small: 128 MiB inside 30s
-needs 4.3 MB/s, so a flat deadline would refuse a perfectly ordinary upload over a slow link. A
-trickle fails the rate within a second of the grace running out, however long it intends to keep
-going.
+`arrival` and `slowest` stop a client that sends a request one byte at a time. Per-read timeouts
+never fire against that, because every read does arrive. loom reads whatever comes for the first
+`arrival`; after that the request must have averaged `slowest` bytes a second or it is `408`, checked
+at every read boundary. A rate and not a deadline, because 128 MiB inside 30s needs 4.3 MB/s and a
+flat deadline would refuse an ordinary upload over a slow link.
 
 ## Stopping
 
@@ -316,9 +287,9 @@ thread::spawn({
 Server::new(handler).stop_with(stop).serve(listener)?;
 ```
 
-`now()` sets the flag and connects to the listener's own address, so an accept already blocked wakes
-and sees it. Nothing new is accepted, a connection in the middle of a request answers it and closes,
-and `serve` returns once the open connections are gone or `drain` runs out.
+`now()` sets the flag and connects to the listener's own address, so a blocked accept wakes and sees
+it. Nothing new is accepted, a connection mid-request answers it and closes, and `serve` returns once
+the open connections are gone or `drain` runs out.
 
 ## What a head must look like
 
@@ -367,7 +338,7 @@ server is about to drop. A slot is held for the whole conversation, which is why
 why there are 64 of them: a browser opens several per origin.
 
 An accepted connection is set `TCP_NODELAY`. A head and its body go out as two writes, and without
-it the second waits on the client's delayed ack. 300 keep-alive requests took 12.3s before and 0.05s
+it the second waits on the client's delayed ack: 300 keep-alive requests took 12.3s before, 0.05s
 after.
 
 ## Layers
